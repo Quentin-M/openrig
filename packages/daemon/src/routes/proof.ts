@@ -10,7 +10,9 @@ import { ProjectReadError } from "../domain/workspace/project-catalog.js";
 
 // #132 — `<project-id>:<scope>` names a scope inside one workspace-catalog project. Project ids share the
 // catalog's id grammar, which cannot contain "/", so an ordinary mission/slice path never matches. A Windows
-// absolute path (`C:\\…`, `C:/…`) is never project-qualified, even though `C` would fit the grammar.
+// absolute path (`C:\\…`, `C:/…`) is never project-qualified, even though `C` would fit the grammar. Nor is a
+// scope that already exists as written: a mission folder may contain a colon (`alpha:trial/slices/01-t001`), and
+// such paths keep resolving as they always have. The prefix qualifies only when it names a catalogued project.
 const QUALIFIED_SCOPE = /^([A-Za-z0-9][A-Za-z0-9._-]{0,63}):(.*)$/;
 
 export function proofRoutes(): Hono {
@@ -30,10 +32,30 @@ export function proofRoutes(): Hono {
    * `<project-id>:` scope prefix resolves through the workspace catalog entry's root and missions root,
    * so contained() is then applied per project root.
    */
+  /** Whether `scope` names an existing directory, as written, under `root` (never outside it). */
+  const existsAt = (root: string | null, scope: string) => {
+    if (!root) return false;
+    try { resolveProofScope(root, scope); return true; } catch { return false; }
+  };
+  /** A catalog project by id, or null when the catalog has no such project (other catalog failures still throw). */
+  const catalogued = (c: Parameters<typeof indexer>[0], id: string) => {
+    try { return projectById(c, id); }
+    catch (e) { if (e instanceof ProjectReadError && (e.code === "project_not_found" || e.code === "invalid_project")) return null; throw e; }
+  };
+  const workspaceRoot = (c: Parameters<typeof indexer>[0]) => {
+    const value = c.get("sliceIndexer" as never) as SliceIndexer | undefined;
+    return value?.isReady() ? value.slicesRoot : null;
+  };
   const target = (c: Parameters<typeof indexer>[0], rawScope: string | undefined, project: unknown, expectedRoot?: unknown) => {
     if (project !== undefined && typeof project !== "string") throw new JudgmentError("judgment_invalid", "Project must be a catalog project id");
     if (expectedRoot !== undefined && typeof expectedRoot !== "string") throw new JudgmentError("judgment_invalid", "projectRoot must be the root a prepared read returned");
-    const qualified = rawScope === undefined || path.win32.isAbsolute(rawScope) ? null : QUALIFIED_SCOPE.exec(rawScope);
+    let qualified = rawScope === undefined || path.win32.isAbsolute(rawScope) ? null : QUALIFIED_SCOPE.exec(rawScope);
+    if (qualified) {
+      // The literal path wins where it exists: under the named project (--project) or else the selected workspace.
+      const flagged = project !== undefined ? catalogued(c, project) : null;
+      const literalRoot = flagged ? flagged.missionsRoot : project === undefined ? workspaceRoot(c) : null;
+      if (existsAt(literalRoot, rawScope!) || !catalogued(c, qualified[1]!)) qualified = null;
+    }
     const id = qualified?.[1] ?? project;
     if (qualified && project !== undefined && project !== qualified[1]) throw new JudgmentError("project_conflict", `Scope names project ${qualified[1]} but --project names ${project}; select one project`);
     const scope = qualified ? qualified[2]! : rawScope;

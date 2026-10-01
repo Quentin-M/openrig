@@ -124,7 +124,11 @@ project. The nearest slice, mission or project policy selects authorized judges;
 `rig proof --help` describes setup, selectors and evidence requirements. In a
 multi-project workspace catalog, name the project with `--project <id>` or a
 `<id>:` scope prefix (`alpha:m0/slices/01-t001`); unqualified scopes use the
-daemon's selected workspace. A catalog-project read names the project
+daemon's selected workspace. The prefix counts only when it names a catalogued
+project and no scope exists at that literal path, so a mission folder with a
+colon (`alpha:trial/slices/01-t001`) still resolves as written. The scopes views
+read a catalog project's readiness against the same project root, so they agree
+with `rig proof show`. A catalog-project read names the project
 (`project: { id, root }`) and reports its source watcher as unavailable; a
 judgment carries that root and is refused (409 `project_changed`) if the
 catalog has since moved the project. A
