@@ -39,33 +39,39 @@ describe("seat environment from a daemon started inside Claude Code and Herdr", 
   const scaffolds: HermeticScaffold[] = [];
   afterEach(() => { for (const s of scaffolds.splice(0)) s.cleanup(); });
 
-  it("seats receive none of the parent session's identity variables, and configuration passes through unchanged", async () => {
+  // "daemon": the daemon starts the tmux server. "existing": a tmux server that
+  // already carries the parent identity is running before the daemon starts.
+  it.each(["daemon", "existing"] as const)("seats receive none of the parent session's identity variables, and configuration passes through unchanged (tmux server: %s)", async (server) => {
     const scaffold = prepareHermeticEnv({
       baseEnv: { HOME: process.env.HOME, PATH: process.env.PATH, TERM: "xterm", ...PARENT_SESSION, ...CONFIGURATION },
     });
     scaffolds.push(scaffold);
-    const tmux = (args: string[]) => run("tmux", ["-S", scaffold.tmuxSocketPath, ...args], {
-      env: { ...process.env, TMUX: undefined, TMUX_TMPDIR: undefined } as NodeJS.ProcessEnv,
-    });
+    const tmux = (args: string[], env: Record<string, string | undefined> = process.env) =>
+      run("tmux", ["-S", scaffold.tmuxSocketPath, ...args], {
+        env: { ...env, PATH: process.env.PATH, TMUX: undefined, TMUX_TMPDIR: undefined } as NodeJS.ProcessEnv,
+      });
+    const environOf = (pid: string): Record<string, string> | null => {
+      const environ = `/proc/${pid}/environ`;
+      return existsSync(environ) ? parseEnv(readFileSync(environ, "utf8"), "\0") : null;
+    };
     const staged = stageTopologyRoot(join(HERE, "fixtures", "scenarios", "topo-stub-baton.yaml"), join(scaffold.root, "topology"));
+    if (server === "existing") await tmux(["new-session", "-d", "-s", "owner-anchor", "sleep 300"], scaffold.env);
 
     const daemon = await spawnScenarioDaemon(scaffold, { rigBin });
     try {
       const up = await runRig(["up", staged.topologyPath, "--json", "--yes"], daemon.readEnv, rigBin, 120_000);
       expect(up.code).toBe(0);
 
-      // What every new pane on the daemon's tmux server starts from.
+      // What every new pane on the tmux server starts from.
       const global = parseEnv((await tmux(["show-environment", "-g"])).stdout, "\n");
-      const seen: Array<Record<string, string>> = [global];
-      // What a seat's pane process was actually given, where the OS exposes it.
+      // What each seat's pane process was actually given, where the OS exposes it.
       const panes = (await tmux(["list-panes", "-a", "-F", "#{session_name} #{pane_pid}"])).stdout
-        .trim().split("\n").filter((line) => line.includes("scn-baton"));
-      expect(panes.length).toBeGreaterThan(0);
-      for (const line of panes) {
-        const environ = `/proc/${line.split(" ")[1]}/environ`;
-        if (existsSync(environ)) seen.push(parseEnv(readFileSync(environ, "utf8"), "\0"));
-      }
-      if (process.platform === "linux") expect(seen.length).toBe(1 + panes.length);
+        .trim().split("\n").map((line) => line.split(" ") as [string, string]);
+      const seatPanes = panes.filter(([session]) => session.includes("scn-baton"));
+      expect(seatPanes.length).toBeGreaterThan(0);
+      const seen = seatPanes.map(([, pid]) => environOf(pid)).filter((env): env is Record<string, string> => env !== null);
+      if (process.platform === "linux") expect(seen.length).toBe(seatPanes.length);
+      if (server === "daemon") seen.push(global);
 
       for (const env of seen) {
         expect(Object.keys(env).filter((k) => k in PARENT_SESSION)).toEqual([]);
@@ -76,6 +82,16 @@ describe("seat environment from a daemon started inside Claude Code and Herdr", 
           HOME: scaffold.home,
           OPENRIG_HOME: scaffold.openrigHome,
         });
+      }
+
+      if (server === "existing") {
+        // Owner state is untouched: the server's global environment and the
+        // pre-existing session keep exactly what they had.
+        expect(global).toMatchObject(PARENT_SESSION);
+        const anchor = panes.find(([session]) => session === "owner-anchor");
+        const anchorEnv = anchor && environOf(anchor[1]);
+        if (process.platform === "linux") expect(anchorEnv).toBeTruthy();
+        if (anchorEnv) expect(anchorEnv).toMatchObject(PARENT_SESSION);
       }
     } finally {
       await runRig(["down", "scn-baton", "--json", "--force"], daemon.readEnv, rigBin, 60_000).catch(() => {});

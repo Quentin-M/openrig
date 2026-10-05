@@ -18,13 +18,18 @@ export const PARENT_SESSION_ENV_KEYS = [
   "HERDR_STARTUP_CWD",
 ] as const;
 
-/** Remove the parent session's identity from `env` in place; nothing else is
- * set or changed. CLAUDE_EFFORT is user configuration unless CLAUDECODE shows a
- * parent Claude Code session set it. Returns the removed names. */
-export function removeParentSessionEnv(env: Record<string, string | undefined>): string[] {
+/** The parent-session names present in `env`. CLAUDE_EFFORT is user
+ * configuration unless CLAUDECODE shows a parent Claude Code session set it. */
+export function parentSessionEnvKeys(env: Readonly<Record<string, string | undefined>>): string[] {
   const keys: string[] = [...PARENT_SESSION_ENV_KEYS];
   if (env.CLAUDECODE) keys.push("CLAUDE_EFFORT");
-  const removed = keys.filter((key) => key in env);
+  return keys.filter((key) => key in env);
+}
+
+/** Remove the parent session's identity from `env` in place; nothing else is
+ * set or changed. Returns the removed names. */
+export function removeParentSessionEnv(env: Record<string, string | undefined>): string[] {
+  const removed = parentSessionEnvKeys(env);
   for (const key of removed) delete env[key];
   return removed;
 }
