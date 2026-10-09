@@ -17,7 +17,7 @@ const POD_YAML = (name: string) => [
   '        agent_ref: "builtin:terminal"',
   '        profile: "none"',
   "        runtime: terminal",
-  "        cwd: /tmp",
+  "        cwd: /",
   "    edges: []",
   "edges: []",
 ].join("\n");
@@ -29,7 +29,7 @@ const LEGACY_YAML = (name: string) => [
   "nodes:",
   "  - id: solo",
   "    runtime: claude-code",
-  "    cwd: /tmp",
+  "    cwd: /",
   "edges: []",
 ].join("\n");
 

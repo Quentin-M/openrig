@@ -151,7 +151,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       (e) => e.category === "runtime_resource" && e.resourceType === "claude_activity_hooks",
     );
     let activityOutcome: ActivityHookOutcome = { changed: false, delivered: false, sourceMissing: false, manifestUnavailable: false, settingsUnparseable: false };
-    if (isFilesystemRoot(binding.cwd)) {
+    // A binding without a cwd (startup bootstraps the stored node's selection) keeps the guarded reconcile below.
+    if (binding.cwd && isFilesystemRoot(binding.cwd)) {
       console.error(`[openrig] claude activity hooks skipped: cwd '${binding.cwd}' resolves to the filesystem root, not a project workspace`);
     } else {
       try {

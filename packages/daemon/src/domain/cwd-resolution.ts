@@ -35,11 +35,8 @@ export function getOpenRigInstallCwdError(
   cwdOverride?: string | null,
   installRoot: string = getOpenRigInstallRoot(),
 ): string | null {
-  // Checked before the override bypass: `rig up` defaults the override to the
-  // caller's process.cwd(), so a launch from '/' arrives as an override.
-  if (isFilesystemRoot(resolvedCwd)) {
-    return `Resolved cwd '${nodePath.resolve(resolvedCwd)}' is the filesystem root, which is not a valid project workspace. Pass --cwd <path> to launch into your project directory.`;
-  }
+  // The filesystem root is not refused (#226): an explicit --cwd / or `cwd: /` is the person's
+  // choice, and `rig up` warns when it defaulted to '/' itself.
   if (cwdOverride && cwdOverride.trim().length > 0) {
     return null;
   }
