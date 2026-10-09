@@ -107,7 +107,45 @@ describe("makeRealStagingDocker — the two-process tar-pipe contract, hermetica
     expect(res.stderr).toContain("timeout");
   });
 
-  it("step timeout kills the step's whole process tree: no descendant of either side survives", async () => {
+  it("DUAL-EXIT: tar fails while docker succeeds → the step FAILS and names the tar side (the shell-pipeline false-green class)", async () => {
+    const docker = shInvoker();
+    // tar exits 3 producing nothing; cat sees immediate EOF and exits 0. A shell pipeline reports
+    // only cat's 0 — the masked-empty-stage defect the contract exists to kill.
+    const res = await docker(["-c", "cat"], ["-c", "exit 3"]);
+    expect(res.code).not.toBe(0);
+    expect(res.stderr).toContain("tar");
+    expect(res.stderr).toContain("3");
+  });
+
+  it("docker-side failure propagates its own exit code", async () => {
+    const docker = shInvoker();
+    const res = await docker(["-c", "exit 5"]);
+    expect(res.code).toBe(5);
+  });
+
+  it("early docker exit while tar is still writing resolves LOUDLY (EPIPE handled, no crash, non-zero)", async () => {
+    const docker = shInvoker();
+    // docker side exits without reading; tar side pushes ~2MB and dies of SIGPIPE. The invoker
+    // must survive the EPIPE on the pipe wiring and report the producer's death as a failure —
+    // content did not arrive, whatever the consumer's exit said.
+    const res = await docker(["-c", "exit 0"], ["-c", "dd if=/dev/zero bs=1024 count=2048 2>/dev/null"]);
+    expect(typeof res.code).toBe("number");
+    expect(res.code).not.toBe(0);
+  });
+
+  it("never rejects: a nonexistent binary resolves with a failure result", async () => {
+    const docker = makeRealStagingDocker({ command: "/nonexistent-binary-xyz" });
+    const res = await docker(["anything"]);
+    expect(res.code).not.toBe(0);
+    expect(res.stderr.length).toBeGreaterThan(0);
+  });
+
+  // The tests above need only sh. The ones below signal real process groups and check pids, so
+  // they are POSIX-only.
+});
+
+describe.skipIf(process.platform === "win32")("makeRealStagingDocker — real process groups and parent signals (POSIX only)", () => {
+  it("step timeout kills each side's process group: no descendant still in either group survives", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "staging-invoker-"));
     const pidFiles = [path.join(dir, "consumer-descendant.pid"), path.join(dir, "producer-descendant.pid")];
     try {
@@ -198,37 +236,4 @@ describe("makeRealStagingDocker — the two-process tar-pipe contract, hermetica
       fs.rmSync(dir, { recursive: true, force: true });
     }
   }, 20_000);
-
-  it("DUAL-EXIT: tar fails while docker succeeds → the step FAILS and names the tar side (the shell-pipeline false-green class)", async () => {
-    const docker = shInvoker();
-    // tar exits 3 producing nothing; cat sees immediate EOF and exits 0. A shell pipeline reports
-    // only cat's 0 — the masked-empty-stage defect the contract exists to kill.
-    const res = await docker(["-c", "cat"], ["-c", "exit 3"]);
-    expect(res.code).not.toBe(0);
-    expect(res.stderr).toContain("tar");
-    expect(res.stderr).toContain("3");
-  });
-
-  it("docker-side failure propagates its own exit code", async () => {
-    const docker = shInvoker();
-    const res = await docker(["-c", "exit 5"]);
-    expect(res.code).toBe(5);
-  });
-
-  it("early docker exit while tar is still writing resolves LOUDLY (EPIPE handled, no crash, non-zero)", async () => {
-    const docker = shInvoker();
-    // docker side exits without reading; tar side pushes ~2MB and dies of SIGPIPE. The invoker
-    // must survive the EPIPE on the pipe wiring and report the producer's death as a failure —
-    // content did not arrive, whatever the consumer's exit said.
-    const res = await docker(["-c", "exit 0"], ["-c", "dd if=/dev/zero bs=1024 count=2048 2>/dev/null"]);
-    expect(typeof res.code).toBe("number");
-    expect(res.code).not.toBe(0);
-  });
-
-  it("never rejects: a nonexistent binary resolves with a failure result", async () => {
-    const docker = makeRealStagingDocker({ command: "/nonexistent-binary-xyz" });
-    const res = await docker(["anything"]);
-    expect(res.code).not.toBe(0);
-    expect(res.stderr.length).toBeGreaterThan(0);
-  });
 });

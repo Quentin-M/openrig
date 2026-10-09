@@ -64,35 +64,59 @@ export function makeRealStagingDocker(opts: RealStagingDockerOptions = {}): Stag
     }, stepTimeoutMs);
 
     try {
-      // Consumer side. Without a producer its stdin is IGNORED (closed at spawn): a child that
-      // reads stdin sees EOF immediately — the exact hole the inline invoker left open.
-      const consumer = spawn(command, args, {
-        stdio: [stdinFrom ? "pipe" : "ignore", "pipe", "pipe"],
-        detached: OWN_SESSION,
-      });
-      trackGroup(consumer, groups);
-      kills.push(() => killAndRelease(consumer));
-
+      let consumer: ReturnType<typeof spawn>;
       let producerDone: Promise<ProcExit> | null = null;
+      let consumerClosed = false;
       let producerClosed = false;
       let producerKilledEarly = false;
       let killProducer: (() => void) | null = null;
-      if (stdinFrom) {
-        const producer = spawn(tarCommand, stdinFrom, {
-          stdio: ["ignore", "pipe", "pipe"],
+      try {
+        // Consumer side. Without a producer its stdin is IGNORED (closed at spawn): a child that
+        // reads stdin sees EOF immediately — the exact hole the inline invoker left open.
+        consumer = spawn(command, args, {
+          stdio: [stdinFrom ? "pipe" : "ignore", "pipe", "pipe"],
           detached: OWN_SESSION,
         });
-        trackGroup(producer, groups);
-        killProducer = () => killAndRelease(producer);
-        kills.push(killProducer);
-        // EPIPE on the wiring (consumer exited early) must not crash the invoker — the producer's
-        // own SIGPIPE death is the loud signal, reported through the dual-exit check below.
-        consumer.stdin!.on("error", () => {});
-        producer.stdout!.pipe(consumer.stdin!); // pipe() forwards EOF when the producer exits
-        producerDone = waitExit(producer).then((exit) => { producerClosed = true; return exit; });
+        trackGroup(consumer, groups);
+        const startedConsumer = consumer;
+        kills.push(() => { if (!consumerClosed) killAndRelease(startedConsumer); });
+
+        if (stdinFrom) {
+          const producer = spawn(tarCommand, stdinFrom, {
+            stdio: ["ignore", "pipe", "pipe"],
+            detached: OWN_SESSION,
+          });
+          trackGroup(producer, groups);
+          // Once the producer has closed, its process group is no longer ours: the leader is
+          // reaped, so its pid (and pgid) can be reused by an unrelated process. Signalling it
+          // later, from the timeout or a parent signal while the consumer still runs, could reach
+          // that process, so a closed producer is never signalled again.
+          killProducer = () => { if (!producerClosed) killAndRelease(producer); };
+          kills.push(killProducer);
+          // EPIPE on the wiring (consumer exited early) must not crash the invoker — the producer's
+          // own SIGPIPE death is the loud signal, reported through the dual-exit check below.
+          consumer.stdin!.on("error", () => {});
+          producer.stdout!.pipe(consumer.stdin!); // pipe() forwards EOF when the producer exits
+          producerDone = waitExit(producer).then((exit) => {
+            producerClosed = true;
+            untrackGroup(producer, groups);
+            return exit;
+          });
+        }
+      } catch (err) {
+        // spawn() and the pipe wiring can throw synchronously (an invalid argument, for example).
+        // A side already started must not be left running, and the invoker never rejects.
+        for (const kill of kills) kill();
+        return {
+          stdout: "",
+          stderr: `step setup failed: ${err instanceof Error ? err.message : String(err)}`,
+          code: 1,
+        };
       }
 
       const consumerExit = await waitExit(consumer);
+      consumerClosed = true; // as for the producer: a closed side's group is never signalled again
+      untrackGroup(consumer, groups);
       // Consumer gone while the producer still runs: the producer's stdout now backs up against a
       // pipe nobody drains, so it would block FOREVER (measured — this invoker's own first cut
       // hung here). Kill it and report the anomaly: a consumer that exited before its feed
@@ -153,8 +177,9 @@ export function makeRealStagingDocker(opts: RealStagingDockerOptions = {}): Stag
 }
 
 /** Each side is spawned `detached`, which on POSIX is setsid(): the child leads its own session
- *  (and process group), so a group kill reaches everything the step started, not just the direct
- *  child. The price: a signal sent to the PARENT's process group (a terminal's Ctrl-C, a closed
+ *  and process group, so a group kill reaches every process still in that group, not just the
+ *  direct child. That is a process-group guarantee, not a whole-tree one: a descendant that calls
+ *  setsid() or setpgid() itself has left the group, and the kill does not reach it. The price: a signal sent to the PARENT's process group (a terminal's Ctrl-C, a closed
  *  terminal or dropped SSH session's SIGHUP, a supervisor's group SIGTERM) no longer reaches the
  *  steps. The live-group registry below pays it back: while any step runs, the parent SIGKILLs
  *  every live step group on process exit and on SIGINT, SIGTERM, SIGHUP and SIGQUIT.
@@ -227,15 +252,23 @@ function releaseGroup(pgid: number): void {
   if (liveGroups.size === 0) uninstallParentHandlers();
 }
 
-/** SIGKILL the child's whole process group, then release our ends of its stdio.
+/** Stop tracking a side that has closed: drop it from this step's groups and the live registry. */
+function untrackGroup(child: ReturnType<typeof spawn>, groups: number[]): void {
+  if (!OWN_SESSION || child.pid === undefined) return;
+  const at = groups.indexOf(child.pid);
+  if (at !== -1) groups.splice(at, 1);
+  releaseGroup(child.pid);
+}
+
+/** SIGKILL the child's process group, then release our ends of its stdio.
  *
  *  A step's direct child is not the only process holding its pipes: `sh -c "sleep 30"` under dash
  *  as shipped on Debian/Ubuntu forks `sleep` instead of exec'ing it (bash execs it), and a real
  *  engine CLI may leave helpers behind. Killing only the direct child leaves those descendants
  *  running as orphans AND leaves `close` (what waitExit settles on, fired once every stdio stream
- *  closes) waiting on them, i.e. the step is unbounded again. The group kill ends the
- *  descendants; destroying the streams is the backstop for one that left the group (a further
- *  setsid). */
+ *  closes) waiting on them, i.e. the step is unbounded again. The group kill ends the descendants
+ *  still in the group. One that left it (its own setsid) is NOT killed; destroying the streams
+ *  only stops it from holding the step open. */
 function killAndRelease(child: ReturnType<typeof spawn>): void {
   let groupKilled = false;
   if (OWN_SESSION && child.pid !== undefined) {

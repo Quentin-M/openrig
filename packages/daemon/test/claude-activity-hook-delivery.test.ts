@@ -152,10 +152,12 @@ describe("Claude activity-hook delivery — shipped relay asset executable mode 
     const assetPath = pathResolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs");
     const mode = statSync(assetPath).mode & 0o777;
     expect(mode & 0o111, `shipped relay mode is 0${mode.toString(8)}, expected executable`).not.toBe(0);
-    // What ships is the COMMITTED mode. A git checkout's working-tree mode is that mode filtered
-    // by the checkout user's umask (umask 002, the default for user-private-group accounts on
-    // many Linux distributions, yields 0775), so the exact 0755 is asserted on the git index when
-    // this is a git checkout, and on the file itself otherwise (e.g. an extracted package).
+    // A git checkout's working-tree mode is the committed mode filtered by the checkout user's
+    // umask (umask 002, the default for user-private-group accounts on many Linux distributions,
+    // yields 0775). So in a git checkout the exact 0755 is asserted on the GIT INDEX entry, which
+    // is what this measures: not HEAD's tree, and not the mode a later package tarball will carry
+    // (that is the packaging step's to keep). Outside a checkout (e.g. an extracted package) it
+    // is asserted on the file itself.
     const indexMode = committedMode(assetPath);
     if (indexMode !== null) {
       expect(indexMode, "committed relay mode").toBe("100755");
