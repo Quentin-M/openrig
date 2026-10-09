@@ -35,6 +35,7 @@ describe("tmux argv exec path", () => {
       "-c", "/home/user/my project/code",
       "-e", "OPENRIG_TRANSCRIPTS_LINES=", "-e", "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=",
       "-e", "PATH=/a b:/c", "-e", "EMPTY=",
+      "-P", "-F", "#{pane_id}",
     ], ["tmux", "show-environment", "-g"]]);
   });
 

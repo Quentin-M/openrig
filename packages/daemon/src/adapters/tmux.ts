@@ -49,7 +49,7 @@ function defaultTmuxFileOps(): TmuxFileOps {
 }
 
 export type TmuxResult =
-  | { ok: true }
+  | { ok: true; warnings?: string[] }
   | { ok: false; code: string; message: string };
 
 export interface TmuxSession {
@@ -203,6 +203,12 @@ function classifyWriteError(err: unknown): TmuxResult {
     return { ok: false, code: "session_not_found", message: err.message };
   }
   return { ok: false, code: "unknown", message: err.message };
+}
+
+/** The launch warning when the parent-session identity cleanup could not finish (#771). */
+function parentSessionEnvWarning(target: string, err: unknown): string {
+  const reason = err instanceof Error ? err.message : String(err);
+  return `${target}: could not remove the launching session's identity (for example CLAUDECODE) from this seat's environment, so the seat may still see it: ${reason}`;
 }
 
 /** Shell-quote a string using single quotes (POSIX-safe). */
@@ -576,22 +582,32 @@ export class TmuxAdapter {
     const argv = ["tmux", "new-session", "-d", "-s", name];
     if (cwd != null) argv.push("-c", cwd);
     for (const [k, v] of Object.entries(seatEnv)) argv.push("-e", `${k}=${v}`);
+    // The pane new-session itself made: an after-new-session hook may select another window.
+    argv.push("-P", "-F", "#{pane_id}");
     const legacyParts = ["tmux", "new-session", "-d", "-s", shellQuote(name)];
     if (cwd != null) legacyParts.push("-c", shellQuote(cwd));
     for (const [k, v] of Object.entries(seatEnv)) legacyParts.push("-e", shellQuote(`${k}=${v}`));
+    legacyParts.push("-P", "-F", shellQuote("#{pane_id}"));
+    let created: string;
     try {
-      await this.run(argv, legacyParts.join(" "));
-      // A tmux server started from a Claude Code session or Herdr pane hands
-      // their identity to every new pane. Mark it removed for this session only
-      // and restart the fresh pane so its shell starts without it.
+      created = (await this.run(argv, legacyParts.join(" "))).trim();
+    } catch (err) {
+      return classifyWriteError(err);
+    }
+    // A tmux server started from a Claude Code session or Herdr pane hands
+    // their identity to every new pane. Mark it removed for this session only
+    // and restart the fresh pane so its shell starts without it. The session
+    // exists either way, so a failure here is a warning, never a failed launch.
+    try {
       if (await this.excludeParentSessionEnv(exactTarget(name, "session"), Object.keys(seatEnv))) {
-        const respawn = ["tmux", "respawn-pane", "-k", "-t", exactTarget(name, "pane")];
+        if (!/^%\d+$/.test(created)) throw new Error(`new-session reported no pane id ("${created}"), so no pane was restarted`);
+        const respawn = ["tmux", "respawn-pane", "-k", "-t", created];
         if (cwd != null) respawn.push("-c", cwd);
         await this.run(respawn, posixJoinArgv(respawn));
       }
       return { ok: true };
     } catch (err) {
-      return classifyWriteError(err);
+      return { ok: true, warnings: [parentSessionEnvWarning(name, err)] };
     }
   }
 
@@ -867,12 +883,18 @@ export class TmuxAdapter {
     if (opts?.cwd != null) legacyRespawn.push("-c", shellQuote(opts.cwd));
     if (opts?.env) for (const [k, v] of Object.entries(opts.env)) legacyRespawn.push("-e", shellQuote(`${k}=${v}`));
     if (command != null && command.length > 0) legacyRespawn.push(shellQuote(command));
+    // The successor starts from the session environment: exclude inherited
+    // parent-session identity there first (sessions made before this existed).
+    // A failure here is a warning; the respawn goes ahead as it did before.
+    let warnings: string[] | undefined;
     try {
-      // The successor starts from the session environment: exclude inherited
-      // parent-session identity there first (sessions made before this existed).
       await this.excludeParentSessionEnv(exact, Object.keys(opts?.env ?? {}));
+    } catch (err) {
+      warnings = [parentSessionEnvWarning(exact, err)];
+    }
+    try {
       await this.run(argv, legacyRespawn.join(" "));
-      return { ok: true };
+      return warnings ? { ok: true, warnings } : { ok: true };
     } catch (err) {
       return classifyWriteError(err);
     }

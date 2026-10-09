@@ -308,7 +308,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec.mock.calls.map((c) => c[0]).slice(1)).toEqual(["tmux show-environment -g"]); // clean server: nothing to exclude
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux new-session -d -s 'r01-dev1-impl' -c '/home/user/code' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS='"
+        "tmux new-session -d -s 'r01-dev1-impl' -c '/home/user/code' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=' -P -F '#{pane_id}'"
       );
     });
 
@@ -320,7 +320,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec.mock.calls.map((c) => c[0]).slice(1)).toEqual(["tmux show-environment -g"]); // clean server: nothing to exclude
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux new-session -d -s 'r01-dev1-impl' -c '/home/user/my project/code' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS='"
+        "tmux new-session -d -s 'r01-dev1-impl' -c '/home/user/my project/code' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=' -P -F '#{pane_id}'"
       );
     });
 
@@ -332,7 +332,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec.mock.calls.map((c) => c[0]).slice(1)).toEqual(["tmux show-environment -g"]); // clean server: nothing to exclude
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux new-session -d -s 'r01-dev'\"'\"'s session' -c '/tmp' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS='"
+        "tmux new-session -d -s 'r01-dev'\"'\"'s session' -c '/tmp' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=' -P -F '#{pane_id}'"
       );
     });
 
@@ -344,7 +344,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec.mock.calls.map((c) => c[0]).slice(1)).toEqual(["tmux show-environment -g"]); // clean server: nothing to exclude
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux new-session -d -s 'r01-dev1-impl' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS='"
+        "tmux new-session -d -s 'r01-dev1-impl' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=' -P -F '#{pane_id}'"
       );
     });
 
@@ -378,7 +378,7 @@ describe("TmuxAdapter", () => {
 
       const cmd = exec.mock.calls[0]![0] as string;
       expect(cmd).toContain("-e 'OPENRIG_TRANSCRIPTS_LINES='");
-      expect(cmd).toBe("tmux new-session -d -s 'r01-test' -c '/tmp' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS='");
+      expect(cmd).toBe("tmux new-session -d -s 'r01-test' -c '/tmp' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=' -P -F '#{pane_id}'");
     });
 
     it("returns { ok: false, code: 'duplicate_session' } on duplicate", async () => {
@@ -691,7 +691,7 @@ describe("TmuxAdapter", () => {
       // createSession with canonical name
       await adapter.createSession("dev-impl@auth-feats", "/home/user/code");
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux new-session -d -s 'dev-impl@auth-feats' -c '/home/user/code' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS='"
+        "tmux new-session -d -s 'dev-impl@auth-feats' -c '/home/user/code' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=' -P -F '#{pane_id}'"
       );
 
       // sendKeys targeting canonical name
@@ -1182,8 +1182,9 @@ describe("TmuxAdapter", () => {
   // so native scrollback survives (predecessor history stays above the successor boot).
   describe("parent-session identity on a tmux server that already carries it", () => {
     const POLLUTED = "CLAUDECODE=1\nCLAUDE_EFFORT=max\nHERDR_PANE_ID=p9\nCLAUDE_CODE_USE_BEDROCK=1\nPATH=/usr/bin\n-REMOVED\n";
+    // new-session reports the pane it created (-P -F '#{pane_id}'); only that pane is restarted.
     const execWithGlobal = (global: string) =>
-      vi.fn<ExecFn>(async (cmd: string) => (cmd === "tmux show-environment -g" ? global : ""));
+      vi.fn<ExecFn>(async (cmd: string) => (cmd === "tmux show-environment -g" ? global : cmd.startsWith("tmux new-session") ? "%9\n" : ""));
 
     it("createSession marks only the listed names removed for this session, keeps explicit seat values, and restarts the fresh pane", async () => {
       const exec = execWithGlobal(POLLUTED);
@@ -1192,7 +1193,7 @@ describe("TmuxAdapter", () => {
         "tmux show-environment -g",
         "tmux set-environment -t =dev-impl@rig -r CLAUDECODE",
         "tmux set-environment -t =dev-impl@rig -r CLAUDE_EFFORT",
-        "tmux respawn-pane -k -t =dev-impl@rig: -c /w",
+        "tmux respawn-pane -k -t %9 -c /w",
       ]);
     });
 
@@ -1201,8 +1202,15 @@ describe("TmuxAdapter", () => {
       await new TmuxAdapter(exec).createSession("s", undefined);
       expect(exec.mock.calls.map((c) => c[0]).slice(2)).toEqual([
         "tmux set-environment -t =s -r HERDR_ENV",
-        "tmux respawn-pane -k -t =s:",
+        "tmux respawn-pane -k -t %9",
       ]);
+    });
+
+    it("createSession restarts no pane, and warns, when new-session reports no pane id", async () => {
+      const exec = vi.fn<ExecFn>(async (cmd: string) => (cmd === "tmux show-environment -g" ? POLLUTED : ""));
+      const result = await new TmuxAdapter(exec).createSession("s", undefined);
+      expect(result).toMatchObject({ ok: true, warnings: [expect.stringContaining("no pane id")] });
+      expect(exec.mock.calls.some(([cmd]) => cmd.startsWith("tmux respawn-pane"))).toBe(false);
     });
 
     it("respawnPane marks the names removed on the pane's session before the respawn, without -k", async () => {
@@ -1224,6 +1232,30 @@ describe("TmuxAdapter", () => {
       });
       expect(await new TmuxAdapter(exec).createSession("s", undefined)).toEqual({ ok: true });
       expect(exec).toHaveBeenCalledTimes(2);
+    });
+
+    // #771 review: the cleanup fails open. A tmux error there leaves a launch that works today
+    // working, and says so as a launch warning.
+    it.each(["set-environment", "respawn-pane"])("createSession still succeeds, with a warning, when the cleanup's %s fails", async (failing) => {
+      const exec = vi.fn<ExecFn>(async (cmd: string) => {
+        if (cmd.startsWith("tmux new-session")) return "%9\n";
+        if (cmd === "tmux show-environment -g") return POLLUTED;
+        if (cmd.startsWith(`tmux ${failing}`)) throw new Error(`${failing} refused`);
+        return "";
+      });
+      const result = await new TmuxAdapter(exec).createSession("s", "/w");
+      expect(result).toMatchObject({ ok: true, warnings: [expect.stringContaining(`${failing} refused`)] });
+    });
+
+    it("respawnPane still respawns, with a warning, when the cleanup fails", async () => {
+      const exec = vi.fn<ExecFn>(async (cmd: string) => {
+        if (cmd === "tmux show-environment -g") return POLLUTED;
+        if (cmd.startsWith("tmux set-environment")) throw new Error("set-environment refused");
+        return "";
+      });
+      const result = await new TmuxAdapter(exec).respawnPane("%3", "codex");
+      expect(result).toMatchObject({ ok: true, warnings: [expect.stringContaining("set-environment refused")] });
+      expect(exec.mock.calls.at(-1)![0]).toBe("tmux respawn-pane -t '%3' 'codex'");
     });
   });
 
