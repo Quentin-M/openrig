@@ -293,4 +293,26 @@ describe("project-qualified proof scope (#132)", () => {
     const flagged = await (await f.get(`project=alpha&scope=${encodeURIComponent("beta:trial/slices/01-t001")}`)).json();
     expect(flagged.items[0].text).toContain("Prove the inside trial.");
   });
+
+  it("an unavailable catalogued project gives the same 409 by `<project>:` prefix as by --project (review)", async () => {
+    const cases = [
+      { error: "missions_unavailable", breakIt: (f: ReturnType<typeof fixture>) => fs.rmSync(f.alpha.missions, { recursive: true }) },
+      { error: "project_unavailable", breakIt: (f: ReturnType<typeof fixture>) => write(join(f.workspace, "alpha", "project.yaml"), { kind: "project", metadata: { id: "someone-else" } }) },
+      { error: "project_root_missing", breakIt: (f: ReturnType<typeof fixture>) => fs.rmSync(join(f.workspace, "alpha"), { recursive: true }) },
+    ];
+    for (const { error, breakIt } of cases) {
+      const f = fixture();
+      breakIt(f);
+      const reads = [
+        await f.get(`scope=${encodeURIComponent("alpha:m0/slices/01-t001")}`),
+        await f.get("project=alpha&scope=m0/slices/01-t001"),
+        await f.get(`project=alpha&scope=${encodeURIComponent("beta:m0/slices/01-t001")}`),
+      ];
+      const judged = [await f.judge("alpha:m0/slices/01-t001", {}, f.beta.slice), await f.judge("m0/slices/01-t001", { project: "alpha" }, f.beta.slice)];
+      for (const res of [...reads, ...judged]) {
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toBe(error);
+      }
+    }
+  });
 });

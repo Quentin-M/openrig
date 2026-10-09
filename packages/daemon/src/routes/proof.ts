@@ -37,10 +37,14 @@ export function proofRoutes(): Hono {
     if (!root) return false;
     try { resolveProofScope(root, scope); return true; } catch { return false; }
   };
+  /** A catalog failure as the proof routes report it, whichever form (prefix or --project) named the project. */
+  const catalogError = (e: unknown) => e instanceof ProjectReadError
+    ? new JudgmentError(e.code, e.message, e.code === "project_not_found" ? 404 : e.code === "invalid_project" ? 400 : 409)
+    : e;
   /** A catalog project by id, or null when the catalog has no such project (other catalog failures still throw). */
   const catalogued = (c: Parameters<typeof indexer>[0], id: string) => {
     try { return projectById(c, id); }
-    catch (e) { if (e instanceof ProjectReadError && (e.code === "project_not_found" || e.code === "invalid_project")) return null; throw e; }
+    catch (e) { if (e instanceof ProjectReadError && (e.code === "project_not_found" || e.code === "invalid_project")) return null; throw catalogError(e); }
   };
   const workspaceRoot = (c: Parameters<typeof indexer>[0]) => {
     const value = c.get("sliceIndexer" as never) as SliceIndexer | undefined;
@@ -64,10 +68,7 @@ export function proofRoutes(): Hono {
     // so prepared references still match at judgment time under a nested authored missions.root.
     let p: ReturnType<typeof projectById>;
     try { p = projectById(c, id); }
-    catch (e) {
-      if (!(e instanceof ProjectReadError)) throw e;
-      throw new JudgmentError(e.code, e.message, e.code === "project_not_found" ? 404 : e.code === "invalid_project" ? 400 : 409);
-    }
+    catch (e) { throw catalogError(e); }
     // A judgment carries the root its prepared read resolved: if the catalog now maps the id elsewhere, refuse
     // rather than record against a different project.
     if (typeof expectedRoot === "string" && expectedRoot !== p.root) throw new JudgmentError("project_changed", `Project ${id} now resolves to ${p.root}, not the ${expectedRoot} the prepared read used; read the proof again`, 409);
