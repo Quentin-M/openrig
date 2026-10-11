@@ -8,7 +8,7 @@ import type {
   SkillResource, GuidanceResource, SubagentResource, RuntimeResource, PluginResource,
 } from "./types.js";
 import type { ResolvedAgentSpec, ResourceCollision } from "./agent-resolver.js";
-import { expandCwd, resolveLaunchCwd } from "./cwd-resolution.js";
+import { resolveAuthoredCwd } from "./cwd-resolution.js";
 import { resolveStartup } from "./startup-resolver.js";
 import { discoverSkillsForRuntime, parseSkillFrontmatter, type SkillRuntime } from "./skill-discovery.js";
 import { inspectSkillDirectory, resolvePluginSkills, resolveSkillLoadout, type SkillLoadout } from "./skill-catalog.js";
@@ -155,9 +155,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
 
   const cwd = ctx.cwdOverride
     ? nodePath.resolve(ctx.cwdOverride)
-    : ctx.specRoot
-      ? resolveLaunchCwd(member.cwd, ctx.specRoot)
-      : expandCwd(member.cwd);
+    : resolveAuthoredCwd(member.cwd, ctx.specRoot || null);
 
   // 2b. Augment the pool with filesystem-discovered skills. Rig-local
   // resources.skills (already in the pool from buildResourcePool) win

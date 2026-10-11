@@ -79,7 +79,7 @@ export class RigSpecPreflight {
     // cwd existence
     for (const node of spec.nodes) {
       if (node.cwd) {
-        const cwd = expandCwd(node.cwd);
+        const cwd = resolveAuthoredCwd(node.cwd, null);
         if (!existsSync(cwd)) {
           errors.push(`cwd '${cwd}' does not exist for node '${node.id}'`);
         } else {
@@ -136,7 +136,7 @@ import { RigSpecCodec } from "./rigspec-codec.js";
 import { RigSpecSchema } from "./rigspec-schema.js";
 import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { resolveNodeConfig, type ResolutionContext } from "./profile-resolver.js";
-import { expandCwd, getOpenRigInstallCwdError, resolveLaunchCwd } from "./cwd-resolution.js";
+import { getOpenRigInstallCwdError, resolveAuthoredCwd, resolveLaunchCwd } from "./cwd-resolution.js";
 import nodePath from "node:path";
 import { validateClaudeActivityHookDelivery, CLAUDE_ACTIVITY_HOOKS_RESOURCE_TYPE } from "./claude-activity-hooks.js";
 import {
