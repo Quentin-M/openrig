@@ -613,14 +613,11 @@ export class TmuxAdapter {
 
   /** Mark the server's inherited parent-session identity as removed in one
    * session's environment, never the server's global one. Explicit seat
-   * values stay. Returns whether anything was marked. */
+   * values stay. Returns whether anything was marked. Throws when the global
+   * environment can't be read: the caller can't tell whether the seat inherits
+   * an identity, so it reports a warning (the launch still goes ahead). */
   private async excludeParentSessionEnv(sessionTarget: string, keep: readonly string[] = []): Promise<boolean> {
-    let global: string;
-    try {
-      global = await this.run(["tmux", "show-environment", "-g"], "tmux show-environment -g");
-    } catch {
-      return false; // Nothing readable to exclude; the launch itself is unaffected.
-    }
+    const global = await this.run(["tmux", "show-environment", "-g"], "tmux show-environment -g");
     const inherited: Record<string, string> = {};
     for (const line of global.split(/\r?\n/)) {
       const eq = line.indexOf("=");

@@ -1225,13 +1225,26 @@ describe("TmuxAdapter", () => {
       ]);
     });
 
-    it("an unreadable global environment leaves the launch as it was", async () => {
+    // An unreadable global environment can't show whether the seat inherits an identity: the launch
+    // goes ahead as before (no pane restarted), and the warning says the cleanup didn't happen.
+    it("an unreadable global environment leaves the launch as it was, with a warning", async () => {
+      const exec = vi.fn<ExecFn>(async (cmd: string) => {
+        if (cmd === "tmux show-environment -g") throw new Error("unsupported");
+        return cmd.startsWith("tmux new-session") ? "%9\n" : "";
+      });
+      const result = await new TmuxAdapter(exec).createSession("s", undefined);
+      expect(result).toMatchObject({ ok: true, warnings: [expect.stringContaining("unsupported")] });
+      expect(exec).toHaveBeenCalledTimes(2);
+    });
+
+    it("respawnPane still respawns, with a warning, when the global environment is unreadable", async () => {
       const exec = vi.fn<ExecFn>(async (cmd: string) => {
         if (cmd === "tmux show-environment -g") throw new Error("unsupported");
         return "";
       });
-      expect(await new TmuxAdapter(exec).createSession("s", undefined)).toEqual({ ok: true });
-      expect(exec).toHaveBeenCalledTimes(2);
+      const result = await new TmuxAdapter(exec).respawnPane("%3", "codex");
+      expect(result).toMatchObject({ ok: true, warnings: [expect.stringContaining("unsupported")] });
+      expect(exec.mock.calls.at(-1)![0]).toBe("tmux respawn-pane -t '%3' 'codex'");
     });
 
     // #771 review: the cleanup fails open. A tmux error there leaves a launch that works today

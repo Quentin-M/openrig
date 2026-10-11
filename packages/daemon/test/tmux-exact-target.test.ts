@@ -30,6 +30,7 @@ function resolve(target: string, sessions: Sessions): string | null {
 }
 
 function runTmux(argv: string[], sessions: Sessions): string {
+  if (argv[1] === "show-environment" && argv[2] === "-g") return ""; // the server's global environment: clean here
   const flag = argv[1] === "detach-client" ? "-s" : "-t";
   const target = argv[argv.indexOf(flag) + 1]!;
   // Even session-scoped options use a target-pane. An unqualified =name is not a session target here.
