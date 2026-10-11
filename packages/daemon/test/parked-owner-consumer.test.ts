@@ -121,6 +121,7 @@ function makeDeps(
   seats: ParkedSeatDiagnosisView[],
   store: RowStore,
   history: WatchdogHistoryEntry[] = [],
+  occupantGeneration: (sessionName: string) => string | null = () => "gen-1",
 ): ParkedOwnerConsumerDeps {
   return {
     diagnoseRig: () => ({ seats }),
@@ -129,6 +130,7 @@ function makeDeps(
       countForJob: () => history.length,
     },
     rows: store.deps(),
+    occupantGeneration,
   };
 }
 
@@ -257,12 +259,14 @@ describe("parked-owner-consumer policy — unit contract (OPR.0.5.6.24)", () => 
     const harness = () => {
       const store = new RowStore();
       const history: WatchdogHistoryEntry[] = [];
+      let generation: string | null = "gen-1";
       const wake = async (seat = parkedSeat()) => {
-        const result = await makeParkedOwnerConsumerPolicy(makeDeps([seat], store, history)).evaluate(makeJob());
+        const result = await makeParkedOwnerConsumerPolicy(makeDeps([seat], store, history, () => generation)).evaluate(makeJob());
         if (result.action === "send") history.unshift(sentHistory({ episodeKey: String(result.notes?.["episodeKey"]), primaryRow: String(result.notes?.["primaryRow"]) }));
         return result;
       };
-      return { store, history, wake, resume: () => wake(parkedSeat({ parked: false })) };
+      const occupant = (next: string | null) => { generation = next; };
+      return { store, history, wake, occupant, resume: () => wake(parkedSeat({ parked: false })) };
     };
     const skippedWhy = (result: { notes?: Record<string, unknown> }) =>
       ((result.notes?.["skippedSeats"] as Array<{ why: string }> | undefined) ?? []).map((s) => s.why);
@@ -336,6 +340,46 @@ describe("parked-owner-consumer policy — unit contract (OPR.0.5.6.24)", () => 
       await resume(); // the old owner's wake was delivered and its episode closed
       const handedOver = parkedSeat({ sessionName: SEAT2 });
       expect((await wake(handedOver)).action).toBe("send");
+    });
+
+    it("a fallback while the old owner's episode is still open gives the new owner its wake", async () => {
+      const { wake } = harness();
+      expect((await wake()).action).toBe("send"); // the old owner stays parked: its episode stays open
+      const handedOver = await wake(parkedSeat({ sessionName: SEAT2 }));
+      expect(handedOver.action).toBe("send");
+      expect(String(handedOver.notes?.["episodeKey"]).startsWith(`${SEAT2}|`)).toBe(true);
+    });
+
+    it("a new occupant at the same seat gets its first wake; the same occupant stays suppressed", async () => {
+      const { wake, resume, occupant } = harness();
+      await wake();
+      await resume();
+      expect(skippedWhy(await wake())).toEqual(["unchanged-since-last-wake"]);
+      occupant("gen-2"); // a handover, fresh launch or restore keeps the session name and writes nothing on the rows
+      await resume();
+      expect((await wake()).action).toBe("send");
+      await resume();
+      expect(skippedWhy(await wake())).toEqual(["unchanged-since-last-wake"]);
+    });
+
+    it("a new occupant isn't held by the previous occupant's open episode", async () => {
+      const { wake, occupant } = harness();
+      await wake();
+      occupant("gen-2");
+      expect((await wake()).action).toBe("send");
+    });
+
+    it("an unknown generation can't show the same occupant, so the repeat is sent; an open episode still dedupes", async () => {
+      const { store, wake, resume, occupant } = harness();
+      occupant(null);
+      await wake();
+      expect(store.appended.find((a) => a.note.startsWith(RESERVE_PREFIX))?.note).not.toContain("generation");
+      expect(skippedWhy(await wake())).toEqual(["already-woken-this-episode"]);
+      await resume();
+      expect((await wake()).action).toBe("send");
+      await resume();
+      occupant("gen-1"); // a wake recorded without a generation doesn't count for a known occupant
+      expect((await wake()).action).toBe("send");
     });
 
     it("a reserve with no recorded delivery (a stop between reserve and delivery) isn't treated as delivered", async () => {
@@ -505,6 +549,7 @@ describe("parked-owner-consumer — R2 integration hard checks (OPR.0.5.6.24)", 
         diagnoseRig: () => ({ seats: [parkedSeat({ parked, obligations: { items, held: [] } })] }),
         history: { listForJob: (_j, l) => history.slice(0, l), countForJob: () => history.length },
         rows: realRows(),
+        occupantGeneration: () => "gen-1",
       }).evaluate(makeJob());
       if (result.action === "send") history.unshift(sentHistory({ episodeKey: String(result.notes?.["episodeKey"]), primaryRow: qitemId }));
       return result;

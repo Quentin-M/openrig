@@ -69,6 +69,9 @@ export interface ParkedOwnerConsumerDeps {
     /** Existing delivery/recovery ownership; does not change the parked diagnosis. */
     recoveryOwnsWake?: (qitemId: string) => boolean;
   };
+  /** The seat's live occupant generation, null when unknown. A delivered wake makes a repeat wait only
+   *  for the occupant it reached, so without this reader every repeat is sent as on main. */
+  occupantGeneration?: (sessionName: string) => string | null;
 }
 
 export const PARKED_OWNER_POLICY_NAME = "parked-owner-consumer";
@@ -109,6 +112,11 @@ function idsHashOf(sortedIds: string[]): string {
   return createHash("sha256").update(sortedIds.join(",")).digest("hex").slice(0, 16);
 }
 
+/** The occupant generation a reserve note recorded, or null when it recorded none. */
+function generationOfNote(note: string): string | null {
+  return note.match(/; generation ([^;\s]+);/)?.[1] ?? null;
+}
+
 /** The key sits immediately after the prefix, delimited by ';', ' (' or EOL —
  *  anchored on the prefix so body words can never masquerade as the key. */
 function keyOfNote(note: string): string | null {
@@ -125,8 +133,9 @@ interface RowEpisodeState {
   openKey: string | null;
   refused: boolean;
   nextOrdinal: number;
-  /** This obligation set's last reserve, open or closed, when that wake is recorded as delivered (a
-   *  reserve alone isn't proof of delivery). Null otherwise, or before its first wake. */
+  /** This seat's last reserve for the set, open or closed, when that wake is recorded as delivered (a
+   *  reserve alone isn't proof of delivery) to the seat's current occupant. Null otherwise, or before
+   *  its first wake. */
   lastDelivered: { ts: string; transitionId?: number } | null;
 }
 
@@ -134,13 +143,14 @@ interface RowEpisodeState {
  *  Open = a reserve note whose key has no later close note. FAILED annotates but
  *  does not close (the ladder owns the failure; the consumer never re-attempts).
  *  REFUSED marks the refusal cell for as long as the episode stays open. */
-function rowEpisode(transitions: RowTransitionView[], idsHash: string, seat: string): RowEpisodeState {
+function rowEpisode(transitions: RowTransitionView[], idsHash: string, seat: string, generation: string | null): RowEpisodeState {
   const closed = new Set<string>();
   const refusedKeys = new Set<string>();
   const failedKeys = new Set<string>();
   const deliveredKeys = new Set<string>();
   let openKey: string | null = null;
   let lastKey: string | null = null;
+  let lastGeneration: string | null = null;
   let lastReserve: { ts: string; transitionId?: number } | null = null;
   let reserves = 0;
   // listTransitions returns oldest-first; walk newest-first.
@@ -154,12 +164,19 @@ function rowEpisode(transitions: RowTransitionView[], idsHash: string, seat: str
     else if (note.startsWith(DELIVERED_PREFIX)) deliveredKeys.add(key);
     else if (note.startsWith(RESERVE_PREFIX) && key.includes(`|${idsHash}#`)) {
       reserves += 1;
-      // Only this seat's own wake can make its repeat wait: a row handed to a new owner keeps its set hash.
-      if (lastKey === null && key.startsWith(`${seat}|`)) { lastKey = key; lastReserve = { ts: transitions[i]!.ts, transitionId: transitions[i]!.transitionId }; }
-      if (openKey === null && !closed.has(key)) openKey = key;
+      // A wake belongs to the seat and the occupant it reached: a row handed to another seat keeps its
+      // set hash, and a new occupant keeps the seat's session name.
+      if (!key.startsWith(`${seat}|`)) continue;
+      const reserveGeneration = generationOfNote(note);
+      if (lastKey === null) { lastKey = key; lastGeneration = reserveGeneration; lastReserve = { ts: transitions[i]!.ts, transitionId: transitions[i]!.transitionId }; }
+      // Another known occupant's open episode isn't this one's. An unknown generation still dedupes.
+      const otherOccupant = generation !== null && reserveGeneration !== null && reserveGeneration !== generation;
+      if (openKey === null && !closed.has(key) && !otherOccupant) openKey = key;
     }
   }
-  const delivered = lastKey !== null && deliveredKeys.has(lastKey) && !refusedKeys.has(lastKey) && !failedKeys.has(lastKey);
+  // Only a delivery to this same known occupant can make a repeat wait.
+  const delivered = lastKey !== null && deliveredKeys.has(lastKey) && !refusedKeys.has(lastKey) && !failedKeys.has(lastKey)
+    && generation !== null && lastGeneration === generation;
   return { openKey, refused: openKey !== null && refusedKeys.has(openKey), nextOrdinal: reserves + 1, lastDelivered: delivered ? lastReserve : null };
 }
 
@@ -308,7 +325,8 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
 
         const idsHash = idsHashOf(namedIds);
         const primaryRow = namedIds[0]!;
-        const ep = rowEpisode(deps.rows.listTransitions(primaryRow), idsHash, seat.sessionName);
+        const generation = deps.occupantGeneration?.(seat.sessionName) ?? null;
+        const ep = rowEpisode(deps.rows.listTransitions(primaryRow), idsHash, seat.sessionName, generation);
         if (ep.openKey !== null) {
           skipped.push({
             seat: seat.sessionName,
@@ -328,7 +346,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
         const episodeKey = `${seat.sessionName}|${idsHash}#${ep.nextOrdinal}`;
         const reserved = deps.rows.appendNote(
           primaryRow,
-          `${RESERVE_PREFIX} ${episodeKey}; obligations ${namedIds.join(",")}`,
+          `${RESERVE_PREFIX} ${episodeKey}; ${generation === null ? "" : `generation ${generation}; `}obligations ${namedIds.join(",")}`,
         );
         if (!reserved.ok) {
           skipped.push({ seat: seat.sessionName, why: "obligation-closed-between-derive-and-wake" });

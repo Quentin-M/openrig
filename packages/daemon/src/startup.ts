@@ -2123,6 +2123,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
                 .list({ destinationSession, state: ["pending", "in-progress", "blocked"], limit: 500 })
                 .map((r) => r.qitemId),
           },
+          occupantGeneration: (sessionName) => sessionRegistry.currentOccupantGenerationForSession(sessionName),
         }),
         // OPR.0.5.6.1 AM-F1 — the delivery engine's two timing legs on THIS
         // substrate. The gateway dispatch binds late (the subsystem is built
