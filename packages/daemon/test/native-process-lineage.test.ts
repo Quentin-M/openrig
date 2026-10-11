@@ -4,6 +4,7 @@ import { findExactNativeResumeProcess, observeClaudePaneStartedAt, observeClaude
 import { operationalLaunchArgs } from "../src/adapters/kernel-authority.js";
 
 const token = "00000000-0000-7000-8000-000000000001";
+const parent = "00000000-0000-7000-8000-0000000000fa";
 const startedAt = "Sat Jan  1 12:00:00 2000";
 function rows(): NativeProcessRow[] {
   return [
@@ -227,6 +228,26 @@ describe("Claude identity with inline settings in ps output", () => {
     expect(await verifyClaudePaneProcess(input(args))).toBeNull();
     expect((await observeClaudeDelivery(input(args))).state).not.toBe("verified");
   });
+  it.each([
+    `--resume ${parent} --fork-session --session-id ${token}`,
+    `--fork-session --session-id=${token} --resume=${parent}`,
+  ])("a fork that names its own --session-id proves the fork, never its parent: %s", async args => {
+    const actual = input(args);
+    expect((await verifyClaudePaneProcess(actual))?.process.pid).toBe(21);
+    expect((await observeClaudeDelivery(actual)).state).toBe("verified");
+    expect(findExactNativeResumeProcess(await actual.listProcesses(), 20, "claude-code", token)?.pid).toBe(21);
+    expect(await verifyClaudePaneProcess({ ...actual, expectedToken: parent })).toBeNull();
+    expect((await observeClaudeDelivery({ ...actual, expectedToken: parent })).state).toBe("unknown");
+  });
+  it.each([
+    `--resume ${token} --fork-session`,
+    `--fork-session --session-id ${token}`,
+    `--resume ${parent} --session-id ${token}`,
+    `--resume ${parent} --fork-session --session-id ${token} --session-id other`,
+  ])("still refuses a fork without its own id or its parent, and two identities without --fork-session: %s", async args => {
+    expect(await verifyClaudePaneProcess(input(args))).toBeNull();
+    expect((await observeClaudeDelivery(input(args))).state).not.toBe("verified");
+  });
   it.each(["before", "after"])("a literal quote %s settings never promotes settings text into identity", async order => {
     const settings = `--settings ${JSON.stringify({ env: { REVIEW_NOTE: `text --session-id ${token} --model trailing` } })}`;
     const name = '--name review"desk';
@@ -413,7 +434,7 @@ describe("Claude exact-resume finder behind a spawning launcher", () => {
     const rows = realRows(`claude --session-id ${other}`).map(r => r.pid === 11 ? { ...r, executableName: comm, command } : r);
     expect(find(rows)).toBeNull();
   });
-  it("leaves --fork-session children as on main (separate follow-up)", () => {
+  it("leaves a --fork-session child that names only its parent as on main", () => {
     expect(find(scriptRows(`claude --resume ${token} --fork-session`))).toBe(11);
   });
 });

@@ -154,10 +154,21 @@ function codexResumeToken(args: string[]): string | null | undefined {
   return null;
 }
 
-// Managed fresh/resume launches name the current Claude identity explicitly.
-// A fork's --resume names its parent, so it cannot prove the new occupant.
+type ClaudeArgvIds = { resume: string | null; "session-id": string | null };
+
+/** The conversation a parsed Claude argv names. A fork's --resume names its parent, so with
+ *  --fork-session only the fork's own --session-id names it, and both must be present. Without
+ *  --fork-session one identity names it and two prove nothing. undefined: no positive proof. */
+function claudeArgvIdentity(ids: ClaudeArgvIds, fork: boolean): string | null | undefined {
+  if (fork) return ids.resume !== null && ids["session-id"] !== null ? ids["session-id"] : undefined;
+  if (ids.resume !== null && ids["session-id"] !== null) return undefined;
+  return ids.resume ?? ids["session-id"];
+}
+
+// Managed fresh/resume/fork launches name the current Claude identity explicitly.
 function claudeSessionToken(args: string[]): string | null {
-  let token: string | null = null;
+  const ids: ClaudeArgvIds = { resume: null, "session-id": null };
+  let fork = false;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (index === 0 && /^\(\d+\.\d+\.\d+[^)]*\)$/.test(arg)) continue;
@@ -173,13 +184,15 @@ function claudeSessionToken(args: string[]): string | null {
     if (["--permission-mode", "--model", "--name", "--effort"].includes(arg)) { index += 1; continue; }
     if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg)
       || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions") continue;
-    const identity = arg.match(/^--(?:session-id|resume)(?:=(.*))?$/);
+    if (arg === "--fork-session") { fork = true; continue; }
+    const identity = arg.match(/^--(session-id|resume)(?:=(.*))?$/);
     if (!identity) return null; // Unknown argv is not positive identity proof.
-    const value = identity[1] ?? args[++index];
-    if (token !== null || !value || value.startsWith("-")) return null;
-    token = value;
+    const kind = identity[1] as keyof ClaudeArgvIds;
+    const value = identity[2] ?? args[++index];
+    if (ids[kind] !== null || !value || value.startsWith("-")) return null;
+    ids[kind] = value;
   }
-  return token;
+  return claudeArgvIdentity(ids, fork) ?? null;
 }
 
 // Delivery-only reading of a Claude argv. Like the strict selector, it accepts
@@ -187,7 +200,8 @@ function claudeSessionToken(args: string[]): string | null {
 // "unparsed": an argument was not recognised, so the argv proves nothing.
 function claudeSessionIdentity(args: string[]): string | null | { unparsed: true } {
   const unparsed = { unparsed: true } as const;
-  let token: string | null = null;
+  const ids: ClaudeArgvIds = { resume: null, "session-id": null };
+  let fork = false;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (index === 0 && /^\(\d+\.\d+\.\d+[^)]*\)$/.test(arg)) continue;
@@ -202,13 +216,16 @@ function claudeSessionIdentity(args: string[]): string | null | { unparsed: true
     }
     if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg)
       || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions") continue;
-    const identity = arg.match(/^--(?:session-id|resume)(?:=(.*))?$/);
+    if (arg === "--fork-session") { fork = true; continue; }
+    const identity = arg.match(/^--(session-id|resume)(?:=(.*))?$/);
     if (!identity) return unparsed; // Unknown argv is not positive identity proof.
-    const value = identity[1] ?? args[++index];
-    if (token !== null || !value || value.startsWith("-")) return unparsed;
-    token = value;
+    const kind = identity[1] as keyof ClaudeArgvIds;
+    const value = identity[2] ?? args[++index];
+    if (ids[kind] !== null || !value || value.startsWith("-")) return unparsed;
+    ids[kind] = value;
   }
-  return token;
+  const named = claudeArgvIdentity(ids, fork);
+  return named === undefined ? unparsed : named;
 }
 
 const DELETED_WITNESS = " (deleted)";
