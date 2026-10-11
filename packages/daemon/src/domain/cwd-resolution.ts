@@ -1,4 +1,18 @@
 import nodePath from "node:path";
+import { homedir } from "node:os";
+
+const ENV_REF = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g;
+
+/** Expands a leading `~` and `$VAR` / `${VAR}` references. A reference to an unset variable is
+ *  left as written so preflight reports the path instead of launching in a silently shortened one. */
+export function expandCwd(
+  authored: string,
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+): string {
+  const tilded = authored === "~" || authored.startsWith("~/") ? home + authored.slice(1) : authored;
+  return tilded.replace(ENV_REF, (ref, braced?: string, bare?: string) => env[braced ?? bare!] ?? ref);
+}
 
 export function resolveLaunchCwd(
   authoredCwd: string | null | undefined,
@@ -11,9 +25,10 @@ export function resolveLaunchCwd(
   if (!authoredCwd || authoredCwd.trim().length === 0) {
     return nodePath.resolve(specRoot);
   }
-  return nodePath.isAbsolute(authoredCwd)
-    ? authoredCwd
-    : nodePath.resolve(specRoot, authoredCwd);
+  const expanded = expandCwd(authoredCwd);
+  return nodePath.isAbsolute(expanded)
+    ? expanded
+    : nodePath.resolve(specRoot, expanded);
 }
 
 export function getOpenRigInstallRoot(): string {
