@@ -134,7 +134,7 @@ interface RowEpisodeState {
  *  Open = a reserve note whose key has no later close note. FAILED annotates but
  *  does not close (the ladder owns the failure; the consumer never re-attempts).
  *  REFUSED marks the refusal cell for as long as the episode stays open. */
-function rowEpisode(transitions: RowTransitionView[], idsHash: string): RowEpisodeState {
+function rowEpisode(transitions: RowTransitionView[], idsHash: string, seat: string): RowEpisodeState {
   const closed = new Set<string>();
   const refusedKeys = new Set<string>();
   const failedKeys = new Set<string>();
@@ -154,7 +154,8 @@ function rowEpisode(transitions: RowTransitionView[], idsHash: string): RowEpiso
     else if (note.startsWith(DELIVERED_PREFIX)) deliveredKeys.add(key);
     else if (note.startsWith(RESERVE_PREFIX) && key.includes(`|${idsHash}#`)) {
       reserves += 1;
-      if (lastKey === null) { lastKey = key; lastReserve = { ts: transitions[i]!.ts, transitionId: transitions[i]!.transitionId }; }
+      // Only this seat's own wake can make its repeat wait: a row handed to a new owner keeps its set hash.
+      if (lastKey === null && key.startsWith(`${seat}|`)) { lastKey = key; lastReserve = { ts: transitions[i]!.ts, transitionId: transitions[i]!.transitionId }; }
       if (openKey === null && !closed.has(key)) openKey = key;
     }
   }
@@ -164,7 +165,8 @@ function rowEpisode(transitions: RowTransitionView[], idsHash: string): RowEpiso
 
 /** Whether what the seat holds changed after `since`: on any of the rows, a transition by the seat
  *  itself or a state change. Notes by other seats and system bookkeeping (this consumer's own
- *  reserve and close notes) aren't changes. A transition the view can't attribute counts as one. */
+ *  reserve and close notes) aren't changes. A transition the view can't attribute counts as one, and
+ *  so does a state with no baseline state to compare it with. */
 function changedSince(listTransitions: (qitemId: string) => RowTransitionView[], ids: string[], seat: string, since: { ts: string; transitionId?: number }): boolean {
   for (const id of ids) {
     let prior: string | undefined;
@@ -174,8 +176,7 @@ function changedSince(listTransitions: (qitemId: string) => RowTransitionView[],
       const atOrBefore = since.transitionId !== undefined && t.transitionId !== undefined ? t.transitionId <= since.transitionId : t.ts <= since.ts;
       if (atOrBefore) { prior = t.state; continue; }
       if (t.actorSession === undefined || t.state === undefined || t.actorSession === seat) return true;
-      if (prior !== undefined && prior !== t.state) return true;
-      prior = t.state;
+      if (prior !== t.state) return true;
     }
   }
   return false;
@@ -307,7 +308,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
 
         const idsHash = idsHashOf(namedIds);
         const primaryRow = namedIds[0]!;
-        const ep = rowEpisode(deps.rows.listTransitions(primaryRow), idsHash);
+        const ep = rowEpisode(deps.rows.listTransitions(primaryRow), idsHash, seat.sessionName);
         if (ep.openKey !== null) {
           skipped.push({
             seat: seat.sessionName,
@@ -338,7 +339,9 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           `You are parked (arbitrated: idle at prompt) while holding ${namedIds.length} open ` +
           `obligation${namedIds.length === 1 ? "" : "s"}: ${namedIds.join(", ")}. ` +
           `Resume the work or update each row honestly (close, park-with-wake, or hand off). ` +
-          `There's no further wake for these same rows until you update one of them or one changes state; held rows stay listed in rig view show held, and the wake-or-escalate ladder handles a wake that failed to deliver.`;
+          `Once this wake is delivered, this check won't wake you again for these same rows until you update one of them or one changes state. ` +
+          `After a wake that failed, was refused or has no recorded outcome, it wakes you again the next time you park. ` +
+          `Held rows stay listed in rig view show held; for a claimed in-progress row, the wake-or-escalate ladder also retries a failed wake.`;
         return {
           action: "send",
           target: { session: seat.sessionName },

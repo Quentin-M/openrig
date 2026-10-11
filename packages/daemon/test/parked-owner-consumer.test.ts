@@ -89,6 +89,9 @@ class RowStore {
   /** One second per transition, so order never depends on the wall clock. */
   private tick(): string { this.clock += 1000; return new Date(this.clock).toISOString(); }
 
+  /** Every row starts with a stated transition, as the repository writes one at creation. */
+  constructor() { for (const id of ROW_IDS) this.record(id, SEAT, "in-progress", "claimed"); }
+
   /** A transition written by someone other than the consumer: a seat's note, or a state change. */
   record(qitemId: string, actorSession: string, state: string, note = "note", ts = this.tick()): void {
     const list = this.transitions.get(qitemId) ?? [];
@@ -186,7 +189,10 @@ describe("parked-owner-consumer policy — unit contract (OPR.0.5.6.24)", () => 
     expect(result.action).toBe("send");
     if (result.action !== "send") return;
     expect(result.message).toContain("wake-or-escalate");
-    expect(result.message).toContain("no further wake for these same rows until you update one of them or one changes state");
+    expect(result.message).toContain("Once this wake is delivered, this check won't wake you again for these same rows until you update one of them or one changes state");
+    expect(result.message).toContain("After a wake that failed, was refused or has no recorded outcome, it wakes you again the next time you park");
+    expect(result.message).toContain("for a claimed in-progress row, the wake-or-escalate ladder also retries a failed wake");
+    expect(result.message).not.toContain("handles a wake that failed to deliver");
     expect(result.message).toContain("rig view show held");
     expect(result.message).not.toContain("S01");
     expect(result.message).not.toContain("OPR.0.5.5.1");
@@ -324,6 +330,14 @@ describe("parked-owner-consumer policy — unit contract (OPR.0.5.6.24)", () => 
       expect(String(result.notes?.["episodeKey"])).toMatch(/#1$/);
     });
 
+    it("a row handed to a new owner (same set) gets the new owner's first wake", async () => {
+      const { wake, resume } = harness();
+      await wake();
+      await resume(); // the old owner's wake was delivered and its episode closed
+      const handedOver = parkedSeat({ sessionName: SEAT2 });
+      expect((await wake(handedOver)).action).toBe("send");
+    });
+
     it("a reserve with no recorded delivery (a stop between reserve and delivery) isn't treated as delivered", async () => {
       const { history, wake, resume } = harness();
       await wake();
@@ -348,6 +362,15 @@ describe("parked-owner-consumer policy — unit contract (OPR.0.5.6.24)", () => 
       await wake();
       await resume();
       store.transitions.get(ROW_IDS[0]!)!.push({ ts: "2026-10-11T23:59:59.000Z", transitionNote: "legacy note" });
+      expect((await wake()).action).toBe("send");
+    });
+
+    it("a state with no baseline state before the reserve counts as a change", async () => {
+      const { store, wake, resume } = harness();
+      store.transitions.set(ROW_IDS[1]!, [{ ts: "2026-10-10T23:59:59.000Z", transitionNote: "created" }]);
+      await wake();
+      await resume();
+      store.record(ROW_IDS[1]!, SEAT2, "pending", "state change by another seat");
       expect((await wake()).action).toBe("send");
     });
   });
