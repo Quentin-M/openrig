@@ -45,7 +45,7 @@ it("a 24-rig landing fetches names only; a selected rig never reads unrelated in
     const u = new URL(String(input)); calls.push(u.pathname + u.search);
     if (u.pathname === "/healthz") return Response.json({ selfHostId: "fixture" });
     if (u.pathname === "/api/rigs/summary") return Response.json(rigs);
-    if (u.pathname === "/api/rigs/r17/nodes" || u.pathname === "/api/queue/recent-transitions") return Response.json([]);
+    if (u.pathname === "/api/rigs/r17/nodes" || u.pathname === "/api/queue/recent-transitions" || u.pathname === "/api/queue/list") return Response.json([]);
     throw Error(`Unrelated request ${u.pathname}`);
   }) as typeof fetch });
   let snap = emptySnapshot();
@@ -58,7 +58,10 @@ it("a 24-rig landing fetches names only; a selected rig never reads unrelated in
   snap = await hydrateSnapshot(client, undefined, null, null, "rig17", view.get());
   expect(snap.readErrors).toEqual([]);
   expect(calls.filter(c => c.endsWith("/nodes"))).toEqual(["/api/rigs/r17/nodes"]);
-  expect(calls).toHaveLength(4);
+  expect(calls.filter(c => c.startsWith("/api/queue/list")).sort()).toEqual([
+    "/api/queue/list?attention=1", "/api/queue/list?state=blocked", "/api/queue/list?state=in-progress", "/api/queue/list?state=pending&limit=50",
+  ]);
+  expect(calls).toHaveLength(8);
 });
 
 it("terminal names never wait for all-rig liveness or any provider preview", async () => {
