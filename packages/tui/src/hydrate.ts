@@ -449,8 +449,8 @@ export async function hydrateSnapshot(
   const wantsRecent = wantsTopologyScope && (!topologyLeaf || topologyLeaf.kind === "host" || topologyLeaf.kind === "rig");
   const focusedTopology = !!viewContext && wantsTopologyScope && viewContext.viewTab !== "pulse";
   const broadReads = !readingOnly && !focusedTopology && !wantsConnections;
-  // Seat rows (Q / WORK / NOW) join these four lists; the seatless landing stays names-only.
-  const seatQueueReads = broadReads || (focusedTopology && !!topologyLeaf);
+  // Seat rows (Q / WORK / NOW) join these four lists: only a seat's page and the drilled table tab show them.
+  const seatQueueReads = broadReads || (focusedTopology && (topologyLeaf?.kind === "agent" || (!!topologyLeaf && viewContext?.viewTab === "table")));
   const healthRequested = broadReads || viewContext?.viewTab === "health";
   const wantsGraph = wantsTopologyScope && (!viewContext || viewContext.viewTab === "graph");
   // A pending pod/agent address needs every rig's seats to resolve.

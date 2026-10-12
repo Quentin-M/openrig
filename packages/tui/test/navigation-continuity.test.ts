@@ -64,6 +64,18 @@ it("a 24-rig landing fetches names only; a selected rig never reads unrelated in
   expect(calls).toHaveLength(8);
 });
 
+it.each(["overview", "graph", "health"] as const)("a drilled rig on the %s tab reads no seat queue lists", async (viewTab) => {
+  const calls: string[] = [];
+  const client = new DaemonClient({ baseUrl: "http://fixture", fetchImpl: (async input => {
+    const u = new URL(String(input)); calls.push(u.pathname + u.search);
+    if (u.pathname === "/healthz") return Response.json({ selfHostId: "fixture" });
+    if (u.pathname === "/api/rigs/summary") return Response.json([{ id: "r1", name: "rig1", lifecycleState: "running" }]);
+    return Response.json([]);
+  }) as typeof fetch });
+  await hydrateSnapshot(client, undefined, null, null, "rig1", { section: "topology", viewTab, drill: [{ kind: "rig", name: "rig1" }] } as never);
+  expect(calls.filter(c => c.startsWith("/api/queue/list"))).toEqual([]);
+});
+
 it("terminal names never wait for all-rig liveness or any provider preview", async () => {
   const calls: string[] = [];
   const client = new DaemonClient({ baseUrl: "http://fixture", fetchImpl: (async input => {
