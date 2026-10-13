@@ -83,12 +83,12 @@ describe.skipIf(!nativeAvailable)("chained capture error classification, real tm
     await tmux("kill-server").catch(() => {});
     fs.rmSync(home, { recursive: true, force: true });
   });
-  /** The production argv transport against this test's private server; `tail` extends every chain. */
+  /** The production argv transport against this test's private server; `tail` extends every chain, never a single capture. */
   const adapter = (tail: string[] = []) => {
     const calls: string[][] = [];
     const a = new TmuxAdapter(shellUnused, undefined, async (argv) => {
       calls.push(argv);
-      return execArgvCommand(["tmux", "-S", sock, ...argv.slice(1), ...(argv.includes("capture-pane") ? tail : [])]);
+      return execArgvCommand(["tmux", "-S", sock, ...argv.slice(1), ...(argv.includes("display-message") ? tail : [])]);
     });
     return { a, calls };
   };
@@ -112,13 +112,15 @@ describe.skipIf(!nativeAvailable)("chained capture error classification, real tm
     for (const n of names) await tmux("kill-session", "-t", `=${n}`).catch(() => {});
   });
 
-  it("pane showing \"can't find session\": a generic chain error maps the chunk to null at once, no halving", async () => {
+  it("pane showing \"can't find session\": an error only the chain hits leaves the chunk out, no halving", async () => {
     const names = await sessions("can't find session: elsewhere");
-    // A runtime error tmux reports after every pane printed, as a version mismatch would.
+    // A runtime error tmux reports after every pane printed; a pane read on its own works.
     const { a, calls } = adapter([";", "set-option", "-g", "openrig-no-such-option", "1"]);
     const got = await a.capturePanesContent(names, 20);
-    for (const n of names) expect(got!.get(n), n).toMatchObject({ text: null });
-    expect(calls.filter((c) => c.includes("capture-pane"))).toHaveLength(1);
+    for (const n of names) expect(got!.has(n), n).toBe(false);
+    expect(calls.filter((c) => c.includes("display-message"))).toHaveLength(1);
+    expect(calls.filter((c) => c.includes("capture-pane"))).toHaveLength(2);
+    for (const n of names) expect(await a.capturePaneContent(n, 20), n).toContain(n === names[0] ? "can't find session: elsewhere" : `${n} ok`);
     for (const n of names) await tmux("kill-session", "-t", `=${n}`).catch(() => {});
   });
 });

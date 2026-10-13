@@ -1137,8 +1137,10 @@ export class TmuxAdapter {
    * text equals what `capturePaneContent` returns. Targets are exact (`=<name>:`): no prefix match, and a name with a
    * "." still resolves. tmux stops a chain at its first failing command, so a failed chunk drops the targets the
    * listing lacks (`missing`) and retries, or is split in half (an oversized output, or a session gone since the
-   * listing); a single session that still fails is left OUT of the map, and the caller reads it per target. Any other
-   * chain error, a server gone since the listing included, maps the chunk to null without a retry. Null when a chain
+   * listing); a single session that still fails is left OUT of the map, and the caller reads it per target. A server
+   * gone since the listing maps the chunk to null without a retry. Any other chain error reads the chunk's first pane on
+   * its own: when that read works, the error belongs to the chained form, and the chunk is left out so the caller reads
+   * each pane per target, as an unbatched read would; when it fails too, the chunk maps to null. Null when a chain
    * fails and tmux can't be listed. Each entry carries the time its own chunk was read (`capturedAt`), so a slow later
    * chunk can't make an earlier capture look fresh.
    */
@@ -1188,9 +1190,11 @@ export class TmuxAdapter {
           return;
         }
         // Halving helps only an output that overflowed exec's buffer (wide, colour-dense panes) or a session that
-        // vanished since the listing. Any other error, such as a client and server version mismatch, would fail every half.
+        // vanished since the listing. Any other error would fail every half: one pane read on its own tells whether it
+        // fails a single capture too, as a client and server version mismatch does, or only the chained form.
         // Node's overflow error is the message's first line; pane text follows it.
         if (!/^.*maxBuffer length exceeded/.test((err as Error).message) && !isSessionAbsenceError(cause) && !isPaneAbsenceError(cause)) {
+          if (await this.capturePaneContent(chunk[0]!, lines) !== null) return;
           for (const t of chunk) out.set(t, { text: null, capturedAt: listedAt });
         } else if (chunk.length > 1) {
           const half = Math.ceil(chunk.length / 2);
