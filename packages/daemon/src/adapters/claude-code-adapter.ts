@@ -1069,29 +1069,47 @@ const defaultSelfReportRead: ClaudeSelfReportRead = {
  *  background shell lives — the omnigent-proven mapping); waiting→needs-input (a dialog
  *  owns input; Claude's internal `waiting` ≠ omnigent's — the collision both codebases
  *  warn about, kept OUT of the activity enum). */
+type SelfReport = { status: string; statusUpdatedAt: number };
+
+// One directory scan serves a whole sweep: every seat's lookup within this window reads the same snapshot.
+const SELF_REPORT_SNAPSHOT_MS = 500;
+const selfReportSnapshots = new WeakMap<ClaudeSelfReportRead, Map<string, { at: number; bySession: Map<string, SelfReport> }>>();
+
+function readSelfReports(read: ClaudeSelfReportRead, dir: string, now: number): Map<string, SelfReport> {
+  let byDir = selfReportSnapshots.get(read);
+  if (!byDir) selfReportSnapshots.set(read, byDir = new Map());
+  const cached = byDir.get(dir);
+  if (cached && now - cached.at >= 0 && now - cached.at < SELF_REPORT_SNAPSHOT_MS) return cached.bySession;
+  const bySession = new Map<string, SelfReport>();
+  for (const file of read.listFiles(dir)) {
+    if (!file.endsWith(".json")) continue;
+    let record: { name?: unknown; status?: unknown; statusUpdatedAt?: unknown };
+    try {
+      record = JSON.parse(read.readFile(nodePath.join(dir, file))) as typeof record;
+    } catch {
+      continue; // one malformed file never breaks the rung
+    }
+    if (typeof record.name !== "string") continue;
+    if (typeof record.status !== "string" || typeof record.statusUpdatedAt !== "number") continue;
+    const best = bySession.get(record.name);
+    if (!best || record.statusUpdatedAt > best.statusUpdatedAt) {
+      bySession.set(record.name, { status: record.status, statusUpdatedAt: record.statusUpdatedAt });
+    }
+  }
+  byDir.set(dir, { at: now, bySession });
+  return bySession;
+}
+
 export function readClaudeSelfReportEvidence(input: {
   sessionsDir: string;
   sessionName: string;
   seatNodeId: string;
   read?: ClaudeSelfReportRead;
+  now?: () => number;
 }): import("../domain/activity-taxonomy.js").ActivityEvidence | null {
   const read = input.read ?? defaultSelfReportRead;
   try {
-    let best: { status: string; statusUpdatedAt: number } | null = null;
-    for (const file of read.listFiles(input.sessionsDir)) {
-      if (!file.endsWith(".json")) continue;
-      let record: { name?: unknown; status?: unknown; statusUpdatedAt?: unknown };
-      try {
-        record = JSON.parse(read.readFile(nodePath.join(input.sessionsDir, file))) as typeof record;
-      } catch {
-        continue; // one malformed file never breaks the rung
-      }
-      if (record.name !== input.sessionName) continue;
-      if (typeof record.status !== "string" || typeof record.statusUpdatedAt !== "number") continue;
-      if (!best || record.statusUpdatedAt > best.statusUpdatedAt) {
-        best = { status: record.status, statusUpdatedAt: record.statusUpdatedAt };
-      }
-    }
+    const best = readSelfReports(read, input.sessionsDir, (input.now ?? Date.now)()).get(input.sessionName) ?? null;
     if (!best) return null;
     const base = {
       seatNodeId: input.seatNodeId,

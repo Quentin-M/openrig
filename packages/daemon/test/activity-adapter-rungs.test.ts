@@ -132,3 +132,43 @@ describe("S19 A5 — production wiring: the sweep auto-declares, consults self-r
     expect(s.rungs.find((r) => r.rung === "lifecycle-hooks")!.trust).toBe("trial");
   });
 });
+
+describe("readClaudeSelfReportEvidence: one directory scan per sweep", () => {
+  const name = (i: number) => `t-s${i}@rig`;
+  function countingRead(files: Record<string, string>) {
+    const counts = { lists: 0, reads: 0 };
+    const read: ClaudeSelfReportRead = {
+      listFiles: () => { counts.lists++; return Object.keys(files); },
+      readFile: (p) => { counts.reads++; return files[p.split("/").pop()!]!; },
+    };
+    return { read, counts };
+  }
+  const pid = (i: number, status: string, at: number) =>
+    JSON.stringify({ pid: i, name: name(i), status, statusUpdatedAt: at });
+
+  it("a sweep over N seats lists the directory once and parses each file once", () => {
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 40; i++) files[`${i}.json`] = pid(i, i % 2 ? "busy" : "idle", 1_000 + i);
+    const { read, counts } = countingRead(files);
+    const now = () => 50_000;
+    for (let i = 0; i < 40; i++) {
+      const ev = readClaudeSelfReportEvidence({ sessionsDir: "/cfg/sessions", sessionName: name(i), seatNodeId: `n${i}`, read, now })!;
+      expect(ev.activity).toBe(i % 2 ? "working" : "idle-at-prompt");
+      expect(ev.seq).toBe(1_000 + i);
+    }
+    expect(counts.lists).toBe(1);
+    expect(counts.reads).toBe(40);
+  });
+
+  it("the next sweep sees a changed status", () => {
+    const files: Record<string, string> = { "1.json": pid(1, "busy", 1_000) };
+    const { read } = countingRead(files);
+    let t = 50_000;
+    const now = () => t;
+    const at = () => readClaudeSelfReportEvidence({ sessionsDir: "/cfg/sessions", sessionName: name(1), seatNodeId: "n1", read, now })!;
+    expect(at().activity).toBe("working");
+    files["1.json"] = pid(1, "idle", 2_000);
+    t += 1_000;
+    expect(at().activity).toBe("idle-at-prompt");
+  });
+});
