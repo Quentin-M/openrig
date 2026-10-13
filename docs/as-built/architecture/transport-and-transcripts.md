@@ -211,10 +211,8 @@ remote daemon's ordinary local routes; the cross-host logic is in the CLI.
 1. `NodeLauncher` starts transcript rotation right after tmux session
    creation, before the harness boots
    (`packages/daemon/src/domain/node-launcher.ts:181`).
-2. Each rotation tick captures the trailing lines with
-   `capturePaneContent` (`transcript-rotation.ts:213` →
-   `adapters/tmux.ts:1082`) and atomically overwrites (temp file + rename,
-   `transcript-rotation.ts:283`–`285`)
+2. Each rotation tick captures the trailing lines and atomically overwrites
+   (temp file + rename, `transcript-rotation.ts:338`–`340`)
    `transcripts/{rig-name}/{session-name}.log` under the OpenRig home (or
    the `transcripts.path` setting). It skips the write when the captured bytes
    are unchanged. Defaults: 1000 trailing lines every 2 s
@@ -223,7 +221,14 @@ remote daemon's ordinary local routes; the cross-host logic is in the CLI.
    `OPENRIG_TRANSCRIPTS_LINES` and `OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS`
    or the matching `transcripts.*` settings. This bounded capture replaced the
    earlier `tmux pipe-pane` stream (`transcript-rotation.ts:3`), so the file
-   holds a trailing window, not the whole session.
+   holds a trailing window, not the whole session. Sessions on one adapter
+   tick on one shared timer, and the captures due in a tick share
+   `capturePanesContent`: one chained call per chunk of 24, with a
+   `list-sessions` beside it that is read only when the chain fails, each
+   chunk on its own (`transcript-rotation.ts:150` →
+   `adapters/tmux.ts:1017`). A session the batch leaves out, a lone due
+   session, or a pane or window target reads per target with
+   `capturePaneContent` (`adapters/tmux.ts:1092`).
 3. `TranscriptStore` owns path convention, ANSI stripping for `readTail` and
    `grep`, boundary
    markers, `readTail`, `readFull`, `grep`. `readFull` returns the raw bytes
@@ -235,7 +240,7 @@ remote daemon's ordinary local routes; the cross-host logic is in the CLI.
 5. On restore: a `--- SESSION BOUNDARY: … ---` marker is written before
    re-launch (`restore-orchestrator.ts:900`); each rotation tick keeps each
    distinct boundary line once, as a header above the fresh capture
-   (`transcript-rotation.ts:254`–`257`). (Restore-side detail in
+   (`transcript-rotation.ts:309`–`312`). (Restore-side detail in
    `lifecycle-snapshot-restore.md`.)
 6. `rig ask` gathers rig summary plus transcript excerpts, chat excerpts,
    insufficiency state, and guidance.
