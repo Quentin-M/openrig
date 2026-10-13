@@ -119,7 +119,7 @@ describe.skipIf(!nativeAvailable)("chained capture error classification, real tm
     const got = await a.capturePanesContent(names, 20);
     for (const n of names) expect(got!.has(n), n).toBe(false);
     expect(calls.filter((c) => c.includes("display-message"))).toHaveLength(1);
-    expect(calls.filter((c) => c.includes("capture-pane"))).toHaveLength(2);
+    expect(calls.filter((c) => c.includes("capture-pane"))).toHaveLength(1);
     for (const n of names) expect(await a.capturePaneContent(n, 20), n).toContain(n === names[0] ? "can't find session: elsewhere" : `${n} ok`);
     for (const n of names) await tmux("kill-session", "-t", `=${n}`).catch(() => {});
   });

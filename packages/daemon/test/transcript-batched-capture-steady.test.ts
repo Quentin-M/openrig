@@ -16,15 +16,15 @@ afterEach(async () => {
 });
 
 /** `sessions` maps a live session to its pane text. `chainError` makes every chained call fail with that message, and
- *  `captureError` every single capture too. */
+ *  `captureError` every single capture too. `listedOnly` names sessions the listing still shows after they are gone. */
 function fakeTmux(latencyMs: number) {
   const sessions = new Map<string, string>();
   const calls: string[] = [];
-  const state = { chainError: null as string | null, captureError: null as string | null };
+  const state = { chainError: null as string | null, captureError: null as string | null, listedOnly: new Set<string>() };
   const adapter = new TmuxAdapter(async () => { throw new Error("shell path unused"); }, undefined, async (argv) => {
     calls.push(argv[1]!);
     await sleep(latencyMs);
-    if (argv[1] === "list-sessions") return [...sessions.keys()].join("\n") + "\n";
+    if (argv[1] === "list-sessions") return [...sessions.keys(), ...state.listedOnly].join("\n") + "\n";
     if (argv[1] === "capture-pane") {
       if (state.captureError) throw new Error(state.captureError);
       const name = argv[argv.indexOf("-t") + 1]!.slice(1, -1);
@@ -73,19 +73,50 @@ it("a seat that exited on its own and keeps rotating leaves its chunk-mates insi
   expect(after.failures - before.failures).toBeLessThanOrEqual(5);
 }, 60_000);
 
-it("an error that fails a single capture too is not halved: one chain, one listing, one probe, every seat reads null", async () => {
+it("an unrecognised chain error is not halved: one chain, one listing, and the chunk is left to per-target reads", async () => {
   const t = fakeTmux(5);
   const names = Array.from({ length: 24 }, (_, i) => `mismatch-${i}@rig`);
   for (const n of names) t.sessions.set(n, `${n} text\n`);
   t.state.chainError = t.state.captureError = "protocol version mismatch (client 8, server 7)";
   const got = await t.adapter.capturePanesContent(names, 20);
-  expect(t.calls.filter((c) => c === "display-message")).toHaveLength(1);
-  expect(t.calls.filter((c) => c === "list-sessions")).toHaveLength(1);
-  expect(t.calls.filter((c) => c === "capture-pane")).toHaveLength(1);
-  for (const n of names) expect(got!.get(n)).toMatchObject({ text: null });
+  expect(t.calls).toEqual(["list-sessions", "display-message"]);
+  for (const n of names) expect(got!.has(n), n).toBe(false);
 }, 30_000);
 
-it("an error only the chained form hits leaves the chunk out: every seat gets its own capture, 24 reads plus 3 execs", async () => {
+/** Rotation over 24 healthy seats whose chained capture fails with an unrecognised error, after `prepare`. */
+async function chainErrorRound(prefix: string, prepare: (t: ReturnType<typeof fakeTmux>, first: string) => void) {
+  const t = fakeTmux(5);
+  const names = Array.from({ length: 24 }, (_, i) => `${prefix}-${i}@rig`);
+  for (const n of names) t.sessions.set(n, `${n} text\n`);
+  t.state.chainError = "unknown command: display-message";
+  prepare(t, names[0]!);
+  const read = start(t, names);
+  await sleep(3000);
+  return { names, read };
+}
+
+it("a chain error whose first pane can't be read on its own still updates the other 23 transcripts", async () => {
+  const { names, read } = await chainErrorRound("first-gone", (t, first) => { t.sessions.delete(first); t.state.listedOnly.add(first); });
+  for (const n of names.slice(1)) expect(read(n), n).toBe(`${n} text\n`);
+}, 30_000);
+
+it("a chain error whose first pane captures empty still updates the other 23 transcripts", async () => {
+  const { names, read } = await chainErrorRound("first-empty", (t, first) => t.sessions.set(first, ""));
+  for (const n of names.slice(1)) expect(read(n), n).toBe(`${n} text\n`);
+}, 30_000);
+
+it("a session gone between the listing and the chain is isolated, and the other 23 transcripts update", async () => {
+  const t = fakeTmux(5);
+  const names = Array.from({ length: 24 }, (_, i) => `listed-gone-${i}@rig`);
+  for (const n of names) t.sessions.set(n, `${n} text\n`);
+  t.sessions.delete(names[5]!);
+  t.state.listedOnly.add(names[5]!);
+  const read = start(t, names);
+  await sleep(3000);
+  for (const n of names.filter((_, i) => i !== 5)) expect(read(n), n).toBe(`${n} text\n`);
+}, 30_000);
+
+it("an error only the chained form hits leaves the chunk out: every seat gets its own capture, 24 reads plus 2 execs", async () => {
   const t = fakeTmux(5);
   const names = Array.from({ length: 24 }, (_, i) => `chain-only-${i}@rig`);
   for (const n of names) t.sessions.set(n, `${n} text\n`);
@@ -93,10 +124,10 @@ it("an error only the chained form hits leaves the chunk out: every seat gets it
   const read = start(t, names);
   await sleep(3000);
   for (const n of names) expect(read(n)).toBe(`${n} text\n`);
-  // Per round, after the activity read: the failed chain, its listing, the probe, then the 24 per-target reads main makes.
+  // Per round, after the activity read: the failed chain, its listing, then the 24 per-target reads main makes.
   const firstRound = t.calls.slice(1, t.calls.indexOf("list-windows", 1));
   expect(firstRound.filter((c) => c === "display-message")).toHaveLength(1);
   expect(firstRound.filter((c) => c === "list-sessions")).toHaveLength(1);
-  expect(firstRound.filter((c) => c === "capture-pane")).toHaveLength(25);
-  expect(firstRound).toHaveLength(27);
+  expect(firstRound.filter((c) => c === "capture-pane")).toHaveLength(24);
+  expect(firstRound).toHaveLength(26);
 }, 30_000);
