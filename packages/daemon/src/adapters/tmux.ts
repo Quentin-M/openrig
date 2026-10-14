@@ -1139,7 +1139,9 @@ export class TmuxAdapter {
    * listing lacks (`missing`) and retries, or is split in half (an oversized output, or a session gone since the
    * listing); a single session that still fails is left OUT of the map, and the caller reads it per target. A server
    * gone since the listing maps the chunk to null without a retry. Any other chain error leaves the chunk out, so the
-   * caller reads each pane per target, as an unbatched read does. Null when a chain fails and tmux can't be listed. Each entry carries the time its own chunk was read (`capturedAt`), so a slow later
+   * caller reads each pane per target, as an unbatched read does. Null when a chain fails because the server is gone
+   * or its socket can't be reached, and tmux can't be listed; a chain that fails for another reason while the listing
+   * fails too leaves the chunk to per-target reads. Each entry carries the time its own chunk was read (`capturedAt`), so a slow later
    * chunk can't make an earlier capture look fresh.
    */
   async capturePanesContent(targets: string[], lines: number = 20, now: () => Date = () => new Date()): Promise<Map<string, PaneCapture> | null> {
@@ -1167,7 +1169,9 @@ export class TmuxAdapter {
       } catch (err) {
         const live = await listing;
         if (!live) {
-          unlisted = true;
+          // A failed listing doesn't show the server is gone; the chain's own error does.
+          const cause = tmuxReportedError(err);
+          if (isNoServerError(cause) || isTmuxTransportAbsentError(cause)) unlisted = true;
           return;
         }
         // The listing answered, so the server was up: the targets it lacks are dropped first.

@@ -20,11 +20,14 @@ afterEach(async () => {
 function fakeTmux(latencyMs: number) {
   const sessions = new Map<string, string>();
   const calls: string[] = [];
-  const state = { chainError: null as string | null, captureError: null as string | null, listedOnly: new Set<string>() };
+  const state = { chainError: null as string | null, captureError: null as string | null, listedOnly: new Set<string>(), listError: null as string | null };
   const adapter = new TmuxAdapter(async () => { throw new Error("shell path unused"); }, undefined, async (argv) => {
     calls.push(argv[1]!);
     await sleep(latencyMs);
-    if (argv[1] === "list-sessions") return [...sessions.keys(), ...state.listedOnly].join("\n") + "\n";
+    if (argv[1] === "list-sessions") {
+      if (state.listError) throw new Error(state.listError);
+      return [...sessions.keys(), ...state.listedOnly].join("\n") + "\n";
+    }
     if (argv[1] === "capture-pane") {
       if (state.captureError) throw new Error(state.captureError);
       const name = argv[argv.indexOf("-t") + 1]!.slice(1, -1);
@@ -114,6 +117,36 @@ it("a session gone between the listing and the chain is isolated, and the other 
   const read = start(t, names);
   await sleep(3000);
   for (const n of names.filter((_, i) => i !== 5)) expect(read(n), n).toBe(`${n} text\n`);
+}, 30_000);
+
+it("a chain error while the listing fails too leaves the chunk to per-target reads: 26 execs, every transcript updates", async () => {
+  const t = fakeTmux(5);
+  const names = Array.from({ length: 24 }, (_, i) => `unlisted-${i}@rig`);
+  for (const n of names) t.sessions.set(n, `${n} text\n`);
+  t.state.chainError = "unknown command: display-message";
+  t.state.listError = "list-sessions: lost server reply";
+  const read = start(t, names);
+  await sleep(3000);
+  for (const n of names) expect(read(n), n).toBe(`${n} text\n`);
+  const firstRound = t.calls.slice(1, t.calls.indexOf("list-windows", 1));
+  expect(firstRound.filter((c) => c === "display-message")).toHaveLength(1);
+  expect(firstRound.filter((c) => c === "list-sessions")).toHaveLength(1);
+  expect(firstRound.filter((c) => c === "capture-pane")).toHaveLength(24);
+  expect(firstRound).toHaveLength(26);
+}, 30_000);
+
+it.each([
+  ["no server running on /tmp/tmux-1000/default"],
+  ["error connecting to /tmp/tmux-1000/default (No such file or directory)"],
+])("a server gone (%s) while the listing fails takes the fast path: 2 execs, no per-target reads", async (chainError) => {
+  const t = fakeTmux(5);
+  const names = Array.from({ length: 24 }, (_, i) => `dead-${i}@rig`);
+  for (const n of names) t.sessions.set(n, `${n} text\n`);
+  t.state.chainError = chainError;
+  t.state.listError = chainError;
+  const got = await t.adapter.capturePanesContent(names, 20);
+  expect(got).toBeNull();
+  expect(t.calls).toEqual(["list-sessions", "display-message"]);
 }, 30_000);
 
 it("an error only the chained form hits leaves the chunk out: every seat gets its own capture, 24 reads plus 2 execs", async () => {
