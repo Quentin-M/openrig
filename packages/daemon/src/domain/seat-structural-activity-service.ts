@@ -2,7 +2,7 @@ import type Database from "better-sqlite3";
 import type { PaneCapture, TmuxAdapter } from "../adapters/tmux.js";
 import { classifyPaneActivity, type PaneActivityClassification } from "./session-transport.js";
 import { detectCodexLimitBanner, type CodexLimitBanner } from "./provider/codex-limit-banner.js";
-import { ACTIVITY_HINT_DEADLINE_MS } from "./transcript-rotation.js";
+import { IDLE_FULL_CAPTURE_MS, windowSnapshot } from "./transcript-rotation.js";
 
 /** A cached STRUCTURAL pane observation: the classifyPaneActivity verdict plus WHEN the pane was read
  *  as motion. observedAt is a LIVENESS timestamp (last time we saw the pane), NOT a hook-arrival age —
@@ -12,6 +12,9 @@ export interface StructuralObservation {
   reason: string;
   evidence: string | null;
   observedAt: string;
+  /** Set when a later sweep found the pane unchanged since observedAt without capturing it. Freshness counts from it;
+   *  observedAt stays the capture. */
+  checkedAt?: string;
 }
 
 export const DEFAULT_STRUCTURAL_POLL_INTERVAL_MS = 1000;
@@ -21,8 +24,6 @@ export const DEFAULT_STRUCTURAL_POLL_INTERVAL_MS = 1000;
 // tolerates a few missed ticks; a persistently failing/stuck poller ages the row out and the ACTIVITY
 // projection falls back to the honest hook/unknown state.
 export const DEFAULT_STRUCTURAL_STALE_MS = 5000;
-// A seat with no pane output since its last capture keeps its verdict; it is captured again at least this often.
-export const STRUCTURAL_FULL_CAPTURE_MS = 60_000;
 
 /**
  * 5b82324b — the STRUCTURAL activity cache. Sibling of SeatActivityService (which reads ONLY the tmux
@@ -77,7 +78,7 @@ export class SeatStructuralActivityService {
   getStructuralActivity(sessionName: string): StructuralObservation | null {
     const obs = this.latestBySession.get(sessionName);
     if (!obs) return null;
-    if (this.now().getTime() - Date.parse(obs.observedAt) >= this.staleAfterMs) {
+    if (this.now().getTime() - Date.parse(obs.checkedAt ?? obs.observedAt) >= this.staleAfterMs) {
       this.latestBySession.delete(sessionName);
       return null;
     }
@@ -155,18 +156,12 @@ export class SeatStructuralActivityService {
       for (const s of Array.from(this.capturedActivity.keys())) if (!live.has(s)) this.capturedActivity.delete(s);
       const sweepAt = this.now();
       const startSec = Math.floor(sweepAt.getTime() / 1000);
-      const read: Promise<Map<string, { activity: number; size?: string }> | null> = this.tmuxAdapter.readAllSessionWindows
-        ? this.tmuxAdapter.readAllSessionWindows().catch(() => null)
-        : this.tmuxAdapter.readAllSessionWindowActivity
-          ? this.tmuxAdapter.readAllSessionWindowActivity()
-            .then((m) => m && new Map([...m].map(([s, a]) => [s, { activity: a }])), () => null)
-          : Promise.resolve(null);
-      // A stalled listing means no hint: every seat is captured, as before, instead of the sweep waiting it out.
-      let deadline: ReturnType<typeof setTimeout> | undefined;
-      const activity = await Promise.race([read, new Promise<null>((resolve) => { deadline = setTimeout(() => resolve(null), ACTIVITY_HINT_DEADLINE_MS); deadline.unref?.(); })]);
-      clearTimeout(deadline);
+      // A listing started by this sweep, so a write before the sweep moves its activity; rotation reuses it. A listing
+      // still running from earlier, or a stalled one, means no hint: every seat is captured, as before.
+      const activity = this.tmuxAdapter.readAllSessionWindows || this.tmuxAdapter.readAllSessionWindowActivity
+        ? await windowSnapshot(this.tmuxAdapter as TmuxAdapter, DEFAULT_STRUCTURAL_POLL_INTERVAL_MS, true) : null;
       // tmux bumps window_activity on every pane write: a seat whose activity is unchanged and older than the sweep
-      // that captured it shows the same pane, so its cached verdict stays current without a capture.
+      // that captured it shows the same pane, so its cached verdict stays current (checkedAt) without a capture.
       const due = rows.filter((r) => {
         const seen = this.capturedActivity.get(r.session_name);
         const now = activity?.get(r.session_name);
@@ -174,8 +169,8 @@ export class SeatStructuralActivityService {
         // The Codex limit row is refreshed by the capture that sees the banner, and ages out without it.
         if (runtimeBySession.get(r.session_name) === "codex" && this.bannerEmitter) return true;
         if (seen && obs && now !== undefined && now.activity === seen.activity && now.size === seen.size && now.activity < seen.startSec
-          && sweepAt.getTime() - seen.fullAt < STRUCTURAL_FULL_CAPTURE_MS) {
-          this.latestBySession.set(r.session_name, { ...obs, observedAt: sweepAt.toISOString() });
+          && sweepAt.getTime() - seen.fullAt < IDLE_FULL_CAPTURE_MS) {
+          this.latestBySession.set(r.session_name, { ...obs, checkedAt: sweepAt.toISOString() });
           return false;
         }
         return true;

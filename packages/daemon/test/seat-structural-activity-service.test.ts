@@ -182,10 +182,13 @@ describe("SeatStructuralActivityService: a pane with no output since its last ca
     const svc = new SeatStructuralActivityService(tmux, () => new Date(t), 20, 5000);
     await svc.pollAllRunningTmuxSeats(db);
     expect(captured).toEqual([["s0@r", "s1@r"]]);
-    for (let i = 0; i < 10; i++) { t += 1000; await svc.pollAllRunningTmuxSeats(db); }
+    const firstObservedAt = svc.getStructuralActivity("s0@r")!.observedAt;
+    for (let i = 0; i < 8; i++) { t += 1000; await svc.pollAllRunningTmuxSeats(db); }
     expect(captured).toEqual([["s0@r", "s1@r"]]); // nothing written since: no capture
     expect(svc.getStructuralActivity("s0@r")?.state).toBe("agent_idle"); // still served, still fresh
     expect(svc.getStructuralActivity("s1@r")?.state).toBe("agent_active");
+    // observedAt stays the capture; checkedAt is the sweep that found the pane unchanged.
+    expect(svc.getStructuralActivity("s0@r")).toMatchObject({ observedAt: firstObservedAt, checkedAt: new Date(t).toISOString() });
     text.set("s0@r", "✻ Working… (1s · esc to interrupt)\n");
     activity.set("s0@r", sec());
     t += 1000; await svc.pollAllRunningTmuxSeats(db);
@@ -328,6 +331,52 @@ describe("SeatStructuralActivityService: what the skip must not hide", () => {
     expect(Date.now() - began).toBeLessThan(6 * 1000 + 1500);
     db.close();
   }, 20_000);
+
+  it("a listing that hangs 8 s stays the only one: no sweep starts another while it is pending", async () => {
+    let t = Date.parse("2026-10-13T00:00:00.400Z");
+    let live = 0, max = 0, started = 0;
+    const hang = () => { started += 1; live += 1; max = Math.max(max, live);
+      return new Promise<null>((resolve) => setTimeout(() => { live -= 1; resolve(null); }, 8000)); };
+    const { tmux, captured } = quiet(hang, () => "• Done.\n\n❯ \n");
+    const db = dbWith("claude-code");
+    const svc = new SeatStructuralActivityService(tmux, () => new Date(t), 20, 5000);
+    for (let i = 0; i < 6; i++) {
+      await svc.pollAllRunningTmuxSeats(db);
+      t += 1000;
+      expect(svc.getStructuralActivity("s0@r")?.state).toBe("agent_idle");
+    }
+    expect(max).toBe(1);
+    expect(started).toBe(1);
+    expect(captured.n).toBe(6); // fallback captures carry on
+    db.close();
+  }, 20_000);
+
+  it("an unchanged seat is read in full every 10 s, so a failing capture drops its verdict within 10 s", async () => {
+    let t = Date.parse("2026-10-13T00:00:00.400Z");
+    const activity = Math.floor(t / 1000) - 600;
+    let fail = false;
+    const captured = { n: 0 };
+    const tmux = {
+      capturePaneContent: async () => null,
+      capturePanesContent: async (targets: string[], _l: number, now: () => Date) => {
+        captured.n += targets.length;
+        return new Map(targets.map((s) => [s, { text: fail ? null : "• Done.\n\n❯ \n", capturedAt: now() }]));
+      },
+      readAllSessionWindows: async () => new Map([["s0@r", { activity, size: "k" }]]),
+    } as never;
+    const db = dbWith("claude-code");
+    const svc = new SeatStructuralActivityService(tmux, () => new Date(t), 20, 5000);
+    await svc.pollAllRunningTmuxSeats(db);
+    fail = true;
+    let droppedAfter: number | null = null;
+    for (let i = 1; i <= 12 && droppedAfter === null; i++) {
+      t += 1000; await svc.pollAllRunningTmuxSeats(db);
+      if (svc.getStructuralActivity("s0@r") === null) droppedAfter = i;
+    }
+    expect(droppedAfter).toBe(10);
+    expect(captured.n).toBe(2);
+    db.close();
+  });
 
   it("a Codex seat keeps being read while the limit-banner emitter is attached: its at_limit row is refreshed by the read", async () => {
     let t = Date.parse("2026-10-13T00:00:00.400Z");

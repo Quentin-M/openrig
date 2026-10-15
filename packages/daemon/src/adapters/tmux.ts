@@ -1373,12 +1373,12 @@ export class TmuxAdapter {
    *   - `null` when the target is missing OR the value is unparseable
    *     (consumers treat null as "no signal", distinct from "idle").
    */
-  /** readAllSessionWindowActivity with each current window's size and active pane from the same call. A resize, a zoom,
-   *  a respawn, a pane switch or a clear-history changes what a capture returns without counting as activity, so readers
-   *  that skip unchanged panes compare both. The session name stays last. */
+  /** readAllSessionWindowActivity with a key of each current window's active pane from the same call. tmux changes
+   *  what a capture returns without counting activity on a resize, a reset, a respawn, a pane switch or a
+   *  clear-history; each moves the pane's id, pid, size, history size or bytes, or its cursor. The session name stays last. */
   async readAllSessionWindows(): Promise<Map<string, { activity: number; size: string }> | null> {
     try {
-      const format = ["#{window_active}", "#{window_activity}", "#{window_width}x#{window_height}:#{pane_id}:#{pane_pid}:#{pane_width}x#{pane_height}:#{history_size}", "#{session_name}"].join(TMUX_FIELD_SEPARATOR);
+      const format = ["#{window_active}", "#{window_activity}", "#{window_width}x#{window_height}:#{pane_id}:#{pane_pid}:#{pane_width}x#{pane_height}:#{history_size}:#{history_bytes}:#{cursor_x},#{cursor_y}", "#{session_name}"].join(TMUX_FIELD_SEPARATOR);
       const output = await this.run(["tmux", "list-windows", "-a", "-F", format], `tmux list-windows -a -F '${format}'`);
       const out = new Map<string, { activity: number; size: string }>();
       for (const line of output.split("\n")) {

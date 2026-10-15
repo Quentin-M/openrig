@@ -160,8 +160,8 @@ describe("batched transcript capture (#161)", () => {
       }
     }
     for (const n of busy) expect(captureTimes.get(n)).toEqual([2000, 4000, 6000, 8000, 10_000, 12_000, 14_000, 16_000]);
-    // The idle seats had no output since their first capture: their idle ticks capture nothing.
-    for (const n of idle) expect(captureTimes.get(n)).toBeUndefined();
+    // The idle seats had no output since their first capture: only the full read every 10 s captures them.
+    for (const n of idle) expect(captureTimes.get(n)).toEqual([11_000]);
     expect(getTranscriptCaptureStats().idleSeats).toBe(3);
   });
 

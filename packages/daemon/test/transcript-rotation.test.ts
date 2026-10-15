@@ -12,6 +12,7 @@ import {
   stopTranscriptRotation,
   getActiveRotationCount,
   getLastCaptureAt,
+  getLastCheckedAt,
   getTranscriptRotationOptionsFromEnv,
   clearAllTranscriptRotationsForTest,
   DEFAULT_TRANSCRIPT_LINES,
@@ -433,7 +434,7 @@ describe("startTranscriptRotation: skips the capture of a pane with no output si
   }
   const opts = { lines: 1000, pollIntervalMs: 1000 };
 
-  it("an idle pane is captured once, then only on the forced refresh, and stays fresh", async () => {
+  it("an idle pane is captured once, then only every 10 s; a skipped tick records a check, not a capture", async () => {
     vi.useFakeTimers({ now: 1_800_000_000_000 });
     const adapter = hintedAdapter("idle-scrollback\n");
     adapter.activity.set("s@rig", 1_800_000_000 - 3600); // last output an hour ago
@@ -441,9 +442,11 @@ describe("startTranscriptRotation: skips the capture of a pane with no output si
     startTranscriptRotation(adapter as unknown as TmuxAdapter, "s@rig", outputPath, opts);
     await vi.advanceTimersByTimeAsync(60_000);
     // Before: every idle tick re-captured the full 1000 lines (about 20 per minute at the idle ceiling).
-    expect(adapter.capturePaneContent.mock.calls.length).toBeLessThanOrEqual(3);
+    expect(adapter.capturePaneContent.mock.calls.length).toBeLessThanOrEqual(7);
     expect(fs.readFileSync(outputPath, "utf8")).toBe("idle-scrollback\n");
-    expect(Date.now() - getLastCaptureAt("s@rig")!).toBeLessThan(3000);
+    // The capture time is the last real capture; the check time is the last skipped tick.
+    expect(Date.now() - getLastCaptureAt("s@rig")!).toBeLessThanOrEqual(10_000 + 3000);
+    expect(Date.now() - getLastCheckedAt("s@rig")!).toBeLessThanOrEqual(3000); // the idle ceiling
     stopTranscriptRotation("s@rig");
   });
 
@@ -484,8 +487,8 @@ describe("startTranscriptRotation: skips the capture of a pane with no output si
   });
 });
 
-describe("startTranscriptRotation: skipped ticks keep ingest health inside the 10 s stale window", () => {
-  it("an idle pane stays capture_fresh for 2 minutes while its captures are skipped", async () => {
+describe("startTranscriptRotation: skipped ticks keep ingest health live with honest capture times", () => {
+  it("an idle pane stays live for 2 minutes; lastCapturedAt is always a real capture", async () => {
     vi.useFakeTimers({ now: 1_800_000_000_000 });
     const adapter = {
       capturePaneContent: vi.fn(async () => "idle\n"),
@@ -493,14 +496,48 @@ describe("startTranscriptRotation: skipped ticks keep ingest health inside the 1
     };
     const store = new TranscriptStore({ transcriptsRoot: tmpDir });
     const file = store.getTranscriptPath("rig", "s@rig");
+    const captureEnds: number[] = [];
+    adapter.capturePaneContent.mockImplementation(async () => { captureEnds.push(Date.now()); return "idle\n"; });
     startTranscriptRotation(adapter as unknown as TmuxAdapter, "s@rig", file, { lines: 1000, pollIntervalMs: 2000 },
       () => ({ lines: 1000, pollIntervalMs: 2000 }));
     for (let i = 0; i < 1200; i++) {
       await vi.advanceTimersByTimeAsync(100);
-      expect(store.getIngestHealth("rig", "s@rig")).toMatchObject({ state: "live", reason: "capture_fresh" });
+      const health = store.getIngestHealth("rig", "s@rig");
+      expect(health.state).toBe("live");
+      expect(["capture_fresh", "capture_unchanged"]).toContain(health.reason);
+      // Never later than the last capture that really ran.
+      expect(Date.parse(health.lastCapturedAt!)).toBeLessThanOrEqual(captureEnds.at(-1)!);
     }
-    // Two minutes: the first capture plus the 60 s refreshes, every other tick skipped.
-    expect(adapter.capturePaneContent.mock.calls.length).toBeLessThanOrEqual(3);
+    // Two minutes: the first capture plus a full read every 10 s, every other tick skipped.
+    expect(adapter.capturePaneContent.mock.calls.length).toBeLessThanOrEqual(14);
+    stopTranscriptRotation("s@rig");
+  });
+});
+
+describe("startTranscriptRotation: a capture that fails on an idle pane", () => {
+  it("is tried by the full read 10 s after the last capture (plus one idle step), and ingest goes stale at once", async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    let fail = false;
+    const adapter = {
+      capturePaneContent: vi.fn(async () => (fail ? null : "idle\n")),
+      readAllSessionWindowActivity: vi.fn(async () => new Map([["s@rig", 1_800_000_000 - 3600]])),
+    };
+    const store = new TranscriptStore({ transcriptsRoot: tmpDir });
+    const file = store.getTranscriptPath("rig", "s@rig");
+    startTranscriptRotation(adapter as unknown as TmuxAdapter, "s@rig", file, { lines: 1000, pollIntervalMs: 2000 },
+      () => ({ lines: 1000, pollIntervalMs: 2000 }));
+    await vi.advanceTimersByTimeAsync(12_000);
+    const lastCapture = getLastCaptureAt("s@rig")!;
+    fail = true;
+    const calls = adapter.capturePaneContent.mock.calls.length;
+    const began = Date.now();
+    while (adapter.capturePaneContent.mock.calls.length === calls) await vi.advanceTimersByTimeAsync(100);
+    expect(Date.now() - lastCapture).toBeLessThanOrEqual(10_000 + 3000);
+    expect(Date.now() - began).toBeLessThanOrEqual(10_000 + 3000);
+    // The failed capture records no capture and clears the check: the 10 s old capture now reads stale.
+    expect(getLastCaptureAt("s@rig")).toBe(lastCapture);
+    expect(getLastCheckedAt("s@rig")).toBeUndefined();
+    expect(store.getIngestHealth("rig", "s@rig")).toMatchObject({ state: "degraded", reason: "capture_stale" });
     stopTranscriptRotation("s@rig");
   });
 });
