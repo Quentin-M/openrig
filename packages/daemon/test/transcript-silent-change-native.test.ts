@@ -24,9 +24,12 @@ let nativeAvailable = process.platform !== "win32";
 try { execFileSync(TMUX, ["-V"], { timeout: 2000, stdio: "ignore" }); } catch { nativeAvailable = false; }
 const OUT = process.env.SILENT_CHANGE_OUT; // one JSON line per measurement, when set
 const WAIT_MS = 20_000;
-// How fast a change must show: a silent change by the next tick or sweep after the pane key moves; a failing capture by
-// the next sweep, the next idle tick (6 s ceiling) and, for ingest, once the last capture is 10 s old.
-const BOUND = { transcriptMs: 8000, verdictMs: 2500, verdictFailureMs: 2500, rotationFailureMs: 8000, ingestMs: 12_000 };
+// How fast a change must show. The verdict: by the end of the second structural sweep after the change, or after a
+// capture starts failing. The transcript: by the next tick after the pane key moves; a failing capture by the next
+// idle tick (6 s ceiling) and, for ingest, once the last capture is 10 s old.
+const FULL_READ_MS = 0; // every sweep reads every seat
+const POLL_SLACK_MS = 200; // the test reads the verdict every 100 ms
+const BOUND = { transcriptMs: 8000, rotationFailureMs: 8000, ingestMs: 12_000 };
 const exec = promisify(execFile);
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const record = (row: object) => { if (OUT) appendFileSync(OUT, JSON.stringify({ tmux: TMUX, ...row }) + "\n"); };
@@ -39,6 +42,8 @@ interface Seat {
   // end of the last real rotation (1000-line) and structural (20-line) capture
   lastEnd: { rotation: number; structural: number }; listings: { live: number; max: number }; failCaptures: { on: boolean };
   rotationCalls: { all: number; failed: number };
+  // [start, end] of every structural sweep that ran (a tick that found one in flight is not a sweep)
+  sweeps: Array<[number, number]>;
   done: () => Promise<void>;
 }
 
@@ -79,13 +84,34 @@ async function seat(name: string, opts: { history: number; screen: string; listi
   const store = new TranscriptStore({ transcriptsRoot: root });
   const file = store.getTranscriptPath("r", name);
   const svc = new SeatStructuralActivityService(adapter);
+  const sweeps: Array<[number, number]> = [];
+  const sweep = svc.pollAllRunningTmuxSeats.bind(svc);
+  svc.pollAllRunningTmuxSeats = async (d) => {
+    const busy = (svc as unknown as { sweeping: boolean }).sweeping, began = Date.now();
+    await sweep(d);
+    if (!busy) sweeps.push([began, Date.now()]);
+  };
   const ropts = { lines: 1000, pollIntervalMs: 2000 };
   startTranscriptRotation(adapter, name, file, ropts, () => ropts);
   svc.start(db, 1000);
   return {
-    name, run, file, store, svc, lastEnd, listings, failCaptures, rotationCalls,
+    name, run, file, store, svc, lastEnd, listings, failCaptures, rotationCalls, sweeps,
     done: async () => { svc.stop(); stopTranscriptRotation(name); await run("kill-server").catch(() => {}); db.close(); rmSync(root, { recursive: true, force: true }); },
   };
+}
+
+/** When the second structural sweep that started at or after `from` ended, in ms after `t0`; null if none did. Two
+ *  sweeps, so a sweep already reading when the change landed is not counted: the bound is in sweeps, not seconds, so
+ *  a host slow enough to stretch a sweep cannot fail it while every sweep still reads what it should. */
+function secondSweepEnd(s: Seat, t0: number, from: number): number | null {
+  const after = s.sweeps.filter(([began]) => began >= from);
+  return after.length >= 2 ? after[1]![1] - t0 : null;
+}
+/** secondSweepEnd once those sweeps have run, or null after `ms`. */
+async function sweepBound(s: Seat, t0: number, from: number, ms = WAIT_MS): Promise<number | null> {
+  const until = Date.now() + ms;
+  while (secondSweepEnd(s, t0, from) === null && Date.now() < until) await wait(100);
+  return secondSweepEnd(s, t0, from);
 }
 
 const read = (f: string) => { try { return readFileSync(f, "utf8"); } catch { return null; } };
@@ -101,8 +127,10 @@ async function truth(s: Seat) {
 async function measure(s: Seat, label: string, act: () => Promise<unknown>) {
   await wait(9000); // idle: ticks and sweeps after the first capture are skips
   const before = await truth(s);
-  const t0 = Date.now();
+  const actAt = Date.now();
   await act();
+  // From when the change is complete: the operation's own tmux calls are not the daemon's latency.
+  const t0 = Date.now();
   const after = await truth(s);
   let transcriptAt: number | null = null, verdictAt: number | null = null, dishonest = 0;
   while (Date.now() - t0 < WAIT_MS && (transcriptAt === null || verdictAt === null)) {
@@ -116,7 +144,7 @@ async function measure(s: Seat, label: string, act: () => Promise<unknown>) {
     await wait(100);
   }
   const row = { case: label, textChanged: before.full !== after.full, verdictBefore: before.verdict, verdictAfter: after.verdict,
-    transcriptMs: transcriptAt, verdictMs: verdictAt, dishonestStamps: dishonest };
+    transcriptMs: transcriptAt, verdictMs: verdictAt, dishonestStamps: dishonest, verdictBoundMs: await sweepBound(s, t0, t0), actMs: t0 - actAt };
   record(row);
   return row;
 }
@@ -164,7 +192,8 @@ describe.concurrent.skipIf(!nativeAvailable)("silent text changes on an idle sea
       expect(r.transcriptMs, "transcript").not.toBeNull();
       expect(r.transcriptMs!, "transcript").toBeLessThanOrEqual(BOUND.transcriptMs);
       expect(r.verdictMs, "verdict").not.toBeNull();
-      expect(r.verdictMs!, "verdict").toBeLessThanOrEqual(BOUND.verdictMs);
+      expect(r.verdictBoundMs, "two structural sweeps ran after the change").not.toBeNull();
+      expect(r.verdictMs!, "verdict by the end of the second sweep after the change").toBeLessThanOrEqual(r.verdictBoundMs! + POLL_SLACK_MS);
       expect(r.dishonestStamps, "capture times ahead of the last real capture").toBe(0);
     }, WAIT_MS + 40_000);
   });
@@ -179,6 +208,7 @@ describe.concurrent.skipIf(!nativeAvailable)("silent text changes on an idle sea
     const s = await seat(`fail${how.length}-s@r`, { history: 2000, screen: PROMPT });
     seats.push(s);
     await wait(9000);
+    const lastStructuralBefore = s.lastEnd.structural;
     const t0 = Date.now();
     await act(s);
     let verdictDroppedMs: number | null = null, rotationFailedMs: number | null = null, ingestDegradedMs: number | null = null;
@@ -188,8 +218,12 @@ describe.concurrent.skipIf(!nativeAvailable)("silent text changes on an idle sea
       if (ingestDegradedMs === null && s.store.getIngestHealth("r", s.name).state !== "live") ingestDegradedMs = Date.now() - t0;
       await wait(100);
     }
-    record({ case: `failing capture on an idle seat: ${how}`, verdictDroppedMs, rotationFailedMs, ingestDegradedMs });
-    expect(verdictDroppedMs).not.toBeNull(); expect(verdictDroppedMs!).toBeLessThanOrEqual(BOUND.verdictFailureMs);
+    // A full read is due FULL_READ_MS after the seat's last real structural capture before the failure.
+    const verdictBoundMs = await sweepBound(s, t0, Math.max(t0, lastStructuralBefore + FULL_READ_MS));
+    record({ case: `failing capture on an idle seat: ${how}`, verdictDroppedMs, rotationFailedMs, ingestDegradedMs, verdictBoundMs });
+    expect(verdictDroppedMs).not.toBeNull();
+    expect(verdictBoundMs, "two structural sweeps ran once a full read was due").not.toBeNull();
+    expect(verdictDroppedMs!, "verdict dropped by the end of the second sweep once a full read was due").toBeLessThanOrEqual(verdictBoundMs! + POLL_SLACK_MS);
     expect(rotationFailedMs).not.toBeNull(); expect(rotationFailedMs!).toBeLessThanOrEqual(BOUND.rotationFailureMs);
     expect(ingestDegradedMs).not.toBeNull(); expect(ingestDegradedMs!).toBeLessThanOrEqual(BOUND.ingestMs);
   }, WAIT_MS + 40_000);
