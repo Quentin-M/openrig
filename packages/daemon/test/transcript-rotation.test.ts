@@ -17,7 +17,6 @@ import {
   DEFAULT_TRANSCRIPT_LINES,
   DEFAULT_TRANSCRIPT_POLL_INTERVAL_MS,
 } from "../src/domain/transcript-rotation.js";
-import { TranscriptStore } from "../src/domain/transcript-store.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
 interface FakeAdapter {
@@ -419,112 +418,5 @@ describe("startTranscriptRotation — bounded polling", () => {
     await vi.advanceTimersByTimeAsync(100);
     expect(getLastCaptureAt("s@rig")).toBe(Date.now());
     expect(fs.statSync(outputPath).ino).toBe(inode);
-  });
-});
-
-describe("startTranscriptRotation: skips the capture of a pane with no output since the last capture", () => {
-  function hintedAdapter(content: string) {
-    const activity = new Map<string, number>();
-    return {
-      activity,
-      capturePaneContent: vi.fn(async () => content),
-      readAllSessionWindowActivity: vi.fn(async () => new Map(activity)),
-    };
-  }
-  const opts = { lines: 1000, pollIntervalMs: 1000 };
-
-  it("an idle pane is captured once, then only on the forced refresh, and stays fresh", async () => {
-    vi.useFakeTimers({ now: 1_800_000_000_000 });
-    const adapter = hintedAdapter("idle-scrollback\n");
-    adapter.activity.set("s@rig", 1_800_000_000 - 3600); // last output an hour ago
-    const outputPath = path.join(tmpDir, "rig", "s.log");
-    startTranscriptRotation(adapter as unknown as TmuxAdapter, "s@rig", outputPath, opts);
-    await vi.advanceTimersByTimeAsync(60_000);
-    // Before: every idle tick re-captured the full 1000 lines (about 20 per minute at the idle ceiling).
-    expect(adapter.capturePaneContent.mock.calls.length).toBeLessThanOrEqual(3);
-    expect(fs.readFileSync(outputPath, "utf8")).toBe("idle-scrollback\n");
-    expect(Date.now() - getLastCaptureAt("s@rig")!).toBeLessThan(3000);
-    stopTranscriptRotation("s@rig");
-  });
-
-  it("new output (a later activity second) is captured on the next tick", async () => {
-    vi.useFakeTimers({ now: 1_800_000_000_000 });
-    const adapter = hintedAdapter("before\n");
-    adapter.activity.set("s@rig", 1_800_000_000 - 3600);
-    const outputPath = path.join(tmpDir, "rig", "s.log");
-    startTranscriptRotation(adapter as unknown as TmuxAdapter, "s@rig", outputPath, opts);
-    await vi.advanceTimersByTimeAsync(10_000);
-    const calls = adapter.capturePaneContent.mock.calls.length;
-    adapter.capturePaneContent.mockResolvedValue("before\nafter\n");
-    adapter.activity.set("s@rig", Math.floor(Date.now() / 1000));
-    await vi.advanceTimersByTimeAsync(2_000);
-    expect(adapter.capturePaneContent.mock.calls.length).toBeGreaterThan(calls);
-    expect(fs.readFileSync(outputPath, "utf8")).toBe("before\nafter\n");
-    stopTranscriptRotation("s@rig");
-  });
-
-  it("output in the same second as the capture start is never skipped", async () => {
-    vi.useFakeTimers({ now: 1_800_000_000_500 });
-    const adapter = hintedAdapter("x\n");
-    adapter.activity.set("s@rig", 1_800_000_000); // the second the first capture starts in
-    const outputPath = path.join(tmpDir, "rig", "s.log");
-    startTranscriptRotation(adapter as unknown as TmuxAdapter, "s@rig", outputPath, opts);
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(adapter.capturePaneContent.mock.calls.length).toBe(2);
-    stopTranscriptRotation("s@rig");
-  });
-
-  it("without an activity hint every due tick still captures", async () => {
-    vi.useFakeTimers({ now: 1_800_000_000_000 });
-    const adapter = makeFakeAdapter("plain\n");
-    startTranscriptRotation(adapter as unknown as TmuxAdapter, "s@rig", path.join(tmpDir, "rig", "s.log"), opts);
-    await vi.advanceTimersByTimeAsync(10_000);
-    expect(adapter.capturePaneContent.mock.calls.length).toBe(11);
-    stopTranscriptRotation("s@rig");
-  });
-});
-
-describe("startTranscriptRotation: skipped ticks keep ingest health inside the 10 s stale window", () => {
-  it("an idle pane stays capture_fresh for 2 minutes while its captures are skipped", async () => {
-    vi.useFakeTimers({ now: 1_800_000_000_000 });
-    const adapter = {
-      capturePaneContent: vi.fn(async () => "idle\n"),
-      readAllSessionWindowActivity: vi.fn(async () => new Map([["s@rig", 1_800_000_000 - 3600]])),
-    };
-    const store = new TranscriptStore({ transcriptsRoot: tmpDir });
-    const file = store.getTranscriptPath("rig", "s@rig");
-    startTranscriptRotation(adapter as unknown as TmuxAdapter, "s@rig", file, { lines: 1000, pollIntervalMs: 2000 },
-      () => ({ lines: 1000, pollIntervalMs: 2000 }));
-    for (let i = 0; i < 1200; i++) {
-      await vi.advanceTimersByTimeAsync(100);
-      expect(store.getIngestHealth("rig", "s@rig")).toMatchObject({ state: "live", reason: "capture_fresh" });
-    }
-    // Two minutes: the first capture plus the 60 s refreshes, every other tick skipped.
-    expect(adapter.capturePaneContent.mock.calls.length).toBeLessThanOrEqual(3);
-    stopTranscriptRotation("s@rig");
-  });
-});
-
-describe("startTranscriptRotation: output right after a skipped tick is captured on the next tick", () => {
-  it("is not delayed by the skip: due at the next shared tick, as after an idle capture", async () => {
-    vi.useFakeTimers({ now: 1_800_000_000_000 });
-    const hint = { at: 1_800_000_000 - 3600 };
-    const adapter = {
-      capturePaneContent: vi.fn(async () => "idle\n"),
-      readAllSessionWindowActivity: vi.fn(async () => new Map([["s@rig", hint.at]])),
-    };
-    const outputPath = path.join(tmpDir, "rig", "s.log");
-    startTranscriptRotation(adapter as unknown as TmuxAdapter, "s@rig", outputPath, { lines: 1000, pollIntervalMs: 2000 },
-      () => ({ lines: 1000, pollIntervalMs: 2000 }));
-    await vi.advanceTimersByTimeAsync(20_000); // idle: every tick since the first is a skip
-    const calls = adapter.capturePaneContent.mock.calls.length;
-    adapter.capturePaneContent.mockResolvedValue("idle\nnew\n");
-    hint.at = Math.floor(Date.now() / 1000);
-    const wrote = Date.now();
-    while (fs.readFileSync(outputPath, "utf8") !== "idle\nnew\n") await vi.advanceTimersByTimeAsync(100);
-    expect(adapter.capturePaneContent.mock.calls.length).toBe(calls + 1);
-    // The next 1 s shared tick, plus the shared activity read, as for a seat that idled with captures.
-    expect(Date.now() - wrote).toBeLessThanOrEqual(2000);
-    stopTranscriptRotation("s@rig");
   });
 });

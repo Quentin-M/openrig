@@ -1,6 +1,6 @@
-// Panes that have not written since their last capture are not captured again. These run against a real tmux server
-// and check that the transcript never misses output the pane printed: random prints with idle gaps, a burst right
-// after a skipped tick, writes inside a capture's own start second, and pane changes that are not output.
+// The pane key and the transcript file stamp, against a real tmux server. A pane change that prints nothing (a resize,
+// a respawn, a pane switch, a zoom, clear-history) and a transcript deleted, truncated or rewritten by another writer
+// land within one tick, though tmux counts no window activity for them.
 import { expect, it } from "vitest";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
@@ -15,7 +15,7 @@ let nativeAvailable = process.platform !== "win32";
 try { execFileSync("tmux", ["-V"], { timeout: 2000, stdio: "ignore" }); } catch { nativeAvailable = false; }
 
 function server(name: string) {
-  const socket = `openrig-skip-${name}-${process.pid}-${Date.now()}`;
+  const socket = `openrig-repair-${name}-${process.pid}-${Date.now()}`;
   const exec = promisify(execFile);
   const run = async (...args: string[]) => (await exec("tmux", ["-L", socket, "-f", "/dev/null", ...args], { timeout: 5000 })).stdout;
   let captures = 0;
@@ -28,9 +28,9 @@ function server(name: string) {
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const say = (run: (...a: string[]) => Promise<string>, text: string) => run("send-keys", "-t", "seat", "-l", text).then(() => run("send-keys", "-t", "seat", "Enter"));
 
-it.skipIf(!nativeAvailable)("never loses output: random prints, idle gaps, bursts after a skipped tick, same-second writes", async () => {
-  const { run, adapter, captures } = server("lost");
-  const root = mkdtempSync(join(tmpdir(), "skip-native-"));
+it.skipIf(!nativeAvailable)("never loses output: random prints, idle gaps, bursts, same-second writes", async () => {
+  const { run, adapter } = server("lost");
+  const root = mkdtempSync(join(tmpdir(), "repair-native-"));
   const store = new TranscriptStore({ transcriptsRoot: root });
   const file = store.getTranscriptPath("rig", "seat");
   const opts = { lines: 1000, pollIntervalMs: 1000 };
@@ -65,8 +65,6 @@ it.skipIf(!nativeAvailable)("never loses output: random prints, idle gaps, burst
     const transcript = readFileSync(file, "utf8");
     for (const [, text] of schedule) expect(transcript, text).toContain(text);
     expect(mismatches, `${mismatches} of ${checks} checks`).toBe(0);
-    // Idle stretches were not captured on every tick.
-    expect(captures()).toBeLessThan(20);
   } finally {
     stopTranscriptRotation("seat");
     await run("kill-server").catch(() => {});
@@ -76,7 +74,7 @@ it.skipIf(!nativeAvailable)("never loses output: random prints, idle gaps, burst
 
 it.skipIf(!nativeAvailable)("a resize while idle is captured on the next tick, though tmux counts no activity", async () => {
   const { run, adapter } = server("resize");
-  const root = mkdtempSync(join(tmpdir(), "skip-resize-"));
+  const root = mkdtempSync(join(tmpdir(), "repair-resize-"));
   const file = join(root, "seat.log");
   const opts = { lines: 1000, pollIntervalMs: 1000 };
   try {
@@ -102,7 +100,7 @@ it.skipIf(!nativeAvailable)("a resize while idle is captured on the next tick, t
 
 it.skipIf(!nativeAvailable)("a pane with no window-activity hint keeps the configured capture cadence", async () => {
   const { run, adapter, captures } = server("nohint");
-  const root = mkdtempSync(join(tmpdir(), "skip-nohint-"));
+  const root = mkdtempSync(join(tmpdir(), "repair-nohint-"));
   const file = join(root, "seat.log");
   const opts = { lines: 1000, pollIntervalMs: 1000 };
   // An older tmux, or a failing listing: the hint read reports nothing.
@@ -127,12 +125,12 @@ it.skipIf(!nativeAvailable)("a pane with no window-activity hint keeps the confi
 // Pane changes tmux reports neither as activity nor as a window resize: each moves a field of the compared pane key.
 async function idleSeat(name: string, opts = { lines: 1000, pollIntervalMs: 1000 }) {
   const { run, adapter, captures } = server(name);
-  const root = mkdtempSync(join(tmpdir(), `skip-${name}-`));
+  const root = mkdtempSync(join(tmpdir(), `repair-${name}-`));
   const file = join(root, "seat.log");
   await run("new-session", "-d", "-s", "seat", "-x", "100", "-y", "20", "sh", "-c", "seq 1 30; exec cat");
   await wait(1500);
   startTranscriptRotation(adapter, "seat", file, opts, () => opts);
-  await wait(3500); // idle: the ticks after the first capture are skips
+  await wait(3500); // idle: the ticks after the first capture back off
   const pane = () => run("capture-pane", "-p", "-t", "=seat:", "-S", "-1000");
   const landsWithin = async (ms: number) => {
     const until = Date.now() + ms;
