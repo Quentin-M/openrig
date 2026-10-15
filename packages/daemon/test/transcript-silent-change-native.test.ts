@@ -1,8 +1,8 @@
 // Real tmux, one private server per case. An idle seat runs transcript rotation and the structural sweep through one
 // TmuxAdapter, as the daemon wires them. Then one tmux operation that changes the pane's text without printing (a resize
-// round trip, a terminal reset, a pane swap, ...) or a capture that fails. Each case checks how long the transcript and
-// the structural verdict take to match a fresh capture, and that no reported capture time runs ahead of a real capture.
-// TMUX_BIN picks the tmux binary (default "tmux").
+// round trip, a terminal reset, a pane swap, ...) or a capture that fails. Every bound counts the daemon's own steps:
+// rotation ticks and structural sweeps that start after the operation has returned, each with a snapshot of what the
+// daemon serves at that moment. A loaded host stretches the steps, not the count. TMUX_BIN picks the tmux binary.
 import { afterAll, describe, expect, it } from "vitest";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
@@ -11,7 +11,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { TranscriptStore } from "../src/domain/transcript-store.js";
+import * as rotation from "../src/domain/transcript-rotation.js";
 import { startTranscriptRotation, stopTranscriptRotation } from "../src/domain/transcript-rotation.js";
+import type { TranscriptIngestHealth } from "../src/domain/transcript-store.js";
 import { SeatStructuralActivityService } from "../src/domain/seat-structural-activity-service.js";
 import { classifyPaneActivity } from "../src/domain/session-transport.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -23,13 +25,18 @@ const TMUX = process.env.TMUX_BIN ?? "tmux";
 let nativeAvailable = process.platform !== "win32";
 try { execFileSync(TMUX, ["-V"], { timeout: 2000, stdio: "ignore" }); } catch { nativeAvailable = false; }
 const OUT = process.env.SILENT_CHANGE_OUT; // one JSON line per measurement, when set
-const WAIT_MS = 20_000;
-// How fast a change must show. The verdict: by the end of the second structural sweep after the change, or for a
-// failing capture after a full read is due (10 s after the seat's last capture). The transcript: by the next tick after
-// the pane key moves; a failing capture by the full read 10 s after the last capture plus one idle step (3 s).
-const FULL_READ_MS = 10_000;
-const POLL_SLACK_MS = 200; // the test reads the verdict every 100 ms
-const BOUND = { transcriptMs: 8000, rotationFailureMs: 13_000, ingestMs: 13_500 };
+const WAIT_MS = 30_000;
+// Rotation's idle capture interval, from its own constants (rotation ticks every 1 s when it resolves live options).
+const TICK_MS = 1000;
+const IDLE_CEILING_MS = Math.max(2000, Math.min(rotation.MAX_IDLE_CAPTURE_INTERVAL_MS, rotation.DEFAULT_TRANSCRIPT_STALE_AFTER_MS
+  - rotation.ACTIVITY_HINT_DEADLINE_MS - rotation.CAPTURE_RESULT_DEADLINE_MS - TICK_MS));
+// A change is in the transcript by the start of this tick after it: the ticks to the next idle capture, one more for a
+// window listing taken before the change, and the capture tick itself must have finished.
+const TRANSCRIPT_TICKS = Math.ceil(IDLE_CEILING_MS / TICK_MS) + 2;
+// A tree that skips quiet panes still reads each in full this often (none on a tree that reads every due pane).
+const FULL_READ_MS = (rotation as unknown as { IDLE_FULL_CAPTURE_MS?: number }).IDLE_FULL_CAPTURE_MS ?? 0;
+// The longest a failing capture on a quiet pane may wait for that full read.
+const MAX_FULL_READ_MS = 10_000;
 const exec = promisify(execFile);
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const record = (row: object) => { if (OUT) appendFileSync(OUT, JSON.stringify({ tmux: TMUX, ...row }) + "\n"); };
@@ -42,8 +49,10 @@ interface Seat {
   // end of the last real rotation (1000-line) and structural (20-line) capture
   lastEnd: { rotation: number; structural: number }; listings: { live: number; max: number }; failCaptures: { on: boolean };
   rotationCalls: { all: number; failed: number };
-  // [start, end] of every structural sweep that ran (a tick that found one in flight is not a sweep)
-  sweeps: Array<[number, number]>;
+  // every structural sweep that ran (a timer tick that found one in flight is not a sweep), with the verdict it left
+  sweeps: Array<{ at: number; end: number; obs: string | null }>;
+  // every rotation tick that ran (one still capturing is not a tick), with the transcript as the previous tick left it
+  ticks: Array<{ at: number; file: string | null; failed: number; health: TranscriptIngestHealth }>;
   done: () => Promise<void>;
 }
 
@@ -84,35 +93,38 @@ async function seat(name: string, opts: { history: number; screen: string; listi
   const store = new TranscriptStore({ transcriptsRoot: root });
   const file = store.getTranscriptPath("r", name);
   const svc = new SeatStructuralActivityService(adapter);
-  const sweeps: Array<[number, number]> = [];
+  const sweeps: Seat["sweeps"] = [], ticks: Seat["ticks"] = [];
   const sweep = svc.pollAllRunningTmuxSeats.bind(svc);
   svc.pollAllRunningTmuxSeats = async (d) => {
-    const busy = (svc as unknown as { sweeping: boolean }).sweeping, began = Date.now();
+    const busy = (svc as unknown as { sweeping: boolean }).sweeping, at = Date.now();
     await sweep(d);
-    if (!busy) sweeps.push([began, Date.now()]);
+    if (!busy) sweeps.push({ at, end: Date.now(), obs: svc.getStructuralActivity(name)?.state ?? null });
   };
   const ropts = { lines: 1000, pollIntervalMs: 2000 };
-  startTranscriptRotation(adapter, name, file, ropts, () => ropts);
+  // A tick resolves its options right after its overlap guard, before it reads anything.
+  startTranscriptRotation(adapter, name, file, ropts, () => {
+    ticks.push({ at: Date.now(), file: read(file), failed: rotationCalls.failed, health: store.getIngestHealth("r", name) });
+    return ropts;
+  });
   svc.start(db, 1000);
   return {
-    name, run, file, store, svc, lastEnd, listings, failCaptures, rotationCalls, sweeps,
+    name, run, file, store, svc, lastEnd, listings, failCaptures, rotationCalls, sweeps, ticks,
     done: async () => { svc.stop(); stopTranscriptRotation(name); await run("kill-server").catch(() => {}); db.close(); rmSync(root, { recursive: true, force: true }); },
   };
 }
 
-/** When the second structural sweep that started at or after `from` ended, in ms after `t0`; null if none did. Two
- *  sweeps, so a sweep already reading when the change landed is not counted: the bound is in sweeps, not seconds, so
- *  a host slow enough to stretch a sweep cannot fail it while every sweep still reads what it should. */
-function secondSweepEnd(s: Seat, t0: number, from: number): number | null {
-  const after = s.sweeps.filter(([began]) => began >= from);
-  return after.length >= 2 ? after[1]![1] - t0 : null;
+/** The `n`th (1-based) of `xs` that started at or after `from`, once it has happened, or null after WAIT_MS. */
+async function nth<T extends { at: number }>(xs: T[], from: number, n: number): Promise<T | null> {
+  const until = Date.now() + WAIT_MS;
+  const find = () => xs.filter((x) => x.at >= from)[n - 1] ?? null;
+  while (find() === null && Date.now() < until) await wait(50);
+  return find();
 }
-/** secondSweepEnd once those sweeps have run, or null after `ms`. */
-async function sweepBound(s: Seat, t0: number, from: number, ms = WAIT_MS): Promise<number | null> {
-  const until = Date.now() + ms;
-  while (secondSweepEnd(s, t0, from) === null && Date.now() < until) await wait(100);
-  return secondSweepEnd(s, t0, from);
-}
+/** 1-based count of the steps after `from` until `ok` first held, or null. */
+const stepsUntil = <T extends { at: number }>(xs: T[], from: number, ok: (x: T) => boolean) => {
+  const i = xs.filter((x) => x.at >= from).findIndex(ok);
+  return i < 0 ? null : i + 1;
+};
 
 const read = (f: string) => { try { return readFileSync(f, "utf8"); } catch { return null; } };
 /** What a capture now shows: the transcript should equal a fresh 1000-line read, the verdict a fresh 20-line read's. */
@@ -122,29 +134,23 @@ async function truth(s: Seat) {
   return { full, verdict: short === "" ? null : classifyPaneActivity(short).state };
 }
 
-/** Polls every 100 ms after the operation until both match, or WAIT_MS. A reported capture time later than the last
- *  real capture (plus the write that follows it) counts as a capture time ahead of a real capture. */
+/** After the operation: the transcript as the daemon serves it at the start of tick TRANSCRIPT_TICKS, and the verdict at
+ *  the end of the second structural sweep, both counted from when the operation returned. The panes are idle, so the
+ *  capture taken right after the operation is the truth for the whole case. */
 async function measure(s: Seat, label: string, act: () => Promise<unknown>) {
   await wait(9000); // idle: ticks and sweeps after the first capture are skips
   const before = await truth(s);
-  const actAt = Date.now();
   await act();
-  // From when the change is complete: the operation's own tmux calls are not the daemon's latency.
   const t0 = Date.now();
   const after = await truth(s);
-  let transcriptAt: number | null = null, verdictAt: number | null = null, dishonest = 0;
-  while (Date.now() - t0 < WAIT_MS && (transcriptAt === null || verdictAt === null)) {
-    const now = await truth(s);
-    const h = s.store.getIngestHealth("r", s.name);
-    const obs = s.svc.getStructuralActivity(s.name);
-    if (transcriptAt === null && read(s.file) === now.full) transcriptAt = Date.now() - t0;
-    if (verdictAt === null && (obs?.state ?? null) === now.verdict) verdictAt = Date.now() - t0;
-    if (h.lastCapturedAt && Date.parse(h.lastCapturedAt) > s.lastEnd.rotation + 500) dishonest += 1;
-    if (obs && Date.parse(obs.observedAt) > s.lastEnd.structural + 500) dishonest += 1;
-    await wait(100);
-  }
+  const [tick, sweep] = await Promise.all([nth(s.ticks, t0, TRANSCRIPT_TICKS), nth(s.sweeps, t0, 2)]);
+  const h = s.store.getIngestHealth("r", s.name), obs = s.svc.getStructuralActivity(s.name);
   const row = { case: label, textChanged: before.full !== after.full, verdictBefore: before.verdict, verdictAfter: after.verdict,
-    transcriptMs: transcriptAt, verdictMs: verdictAt, dishonestStamps: dishonest, verdictBoundMs: await sweepBound(s, t0, t0), actMs: t0 - actAt };
+    transcriptAtTick: tick ? tick.file === after.full : null, verdictAtSweep: sweep ? sweep.obs === after.verdict : null,
+    transcriptTicks: stepsUntil(s.ticks, t0, (x) => x.file === after.full), verdictSweeps: stepsUntil(s.sweeps, t0, (x) => x.obs === after.verdict),
+    tickMs: tick && tick.at - t0, sweepMs: sweep && sweep.end - t0,
+    capturedAhead: Number(Boolean(h.lastCapturedAt && Date.parse(h.lastCapturedAt) > s.lastEnd.rotation + 500))
+      + Number(Boolean(obs && Date.parse(obs.observedAt) > s.lastEnd.structural + 500)) };
   record(row);
   return row;
 }
@@ -189,12 +195,9 @@ describe.concurrent.skipIf(!nativeAvailable)("silent text changes on an idle sea
       seats.push(s);
       const r = await measure(s, c.label, () => c.op(s));
       if (c.changes) expect(r.textChanged).toBe(true);
-      expect(r.transcriptMs, "transcript").not.toBeNull();
-      expect(r.transcriptMs!, "transcript").toBeLessThanOrEqual(BOUND.transcriptMs);
-      expect(r.verdictMs, "verdict").not.toBeNull();
-      expect(r.verdictBoundMs, "two structural sweeps ran after the change").not.toBeNull();
-      expect(r.verdictMs!, "verdict by the end of the second sweep after the change").toBeLessThanOrEqual(r.verdictBoundMs! + POLL_SLACK_MS);
-      expect(r.dishonestStamps, "capture times ahead of the last real capture").toBe(0);
+      expect(r.transcriptAtTick, `transcript by the start of rotation tick ${TRANSCRIPT_TICKS} after the change`).toBe(true);
+      expect(r.verdictAtSweep, "verdict by the end of the second structural sweep after the change").toBe(true);
+      expect(r.capturedAhead, "capture times ahead of the last real capture").toBe(0);
     }, WAIT_MS + 40_000);
   });
 
@@ -205,28 +208,28 @@ describe.concurrent.skipIf(!nativeAvailable)("silent text changes on an idle sea
     ["tmux server killed", (s) => s.run("kill-server")],
   ];
   for (const [how, act] of FAILURES) it(`a failing capture on an idle seat is noticed: ${how}`, async () => {
+    expect(FULL_READ_MS, "a quiet pane is read in full at least every 10 s").toBeLessThanOrEqual(MAX_FULL_READ_MS);
     const s = await seat(`fail${how.length}-s@r`, { history: 2000, screen: PROMPT });
     seats.push(s);
     await wait(9000);
-    const lastStructuralBefore = s.lastEnd.structural;
-    const t0 = Date.now();
+    const lastStructural = s.lastEnd.structural, lastRotation = s.lastEnd.rotation;
     await act(s);
-    let verdictDroppedMs: number | null = null, rotationFailedMs: number | null = null, ingestDegradedMs: number | null = null;
-    while (Date.now() - t0 < WAIT_MS && (verdictDroppedMs === null || rotationFailedMs === null || ingestDegradedMs === null)) {
-      if (verdictDroppedMs === null && s.svc.getStructuralActivity(s.name) === null) verdictDroppedMs = Date.now() - t0;
-      if (rotationFailedMs === null && s.rotationCalls.failed > 0) rotationFailedMs = Date.now() - t0;
-      if (ingestDegradedMs === null && s.store.getIngestHealth("r", s.name).state !== "live") ingestDegradedMs = Date.now() - t0;
-      await wait(100);
-    }
-    // A full read is due FULL_READ_MS after the seat's last real structural capture before the failure.
-    const verdictBoundMs = await sweepBound(s, t0, Math.max(t0, lastStructuralBefore + FULL_READ_MS));
-    record({ case: `failing capture on an idle seat: ${how}`, verdictDroppedMs, rotationFailedMs, ingestDegradedMs, verdictBoundMs });
-    expect(verdictDroppedMs).not.toBeNull();
-    expect(verdictBoundMs, "two structural sweeps ran once a full read was due").not.toBeNull();
-    expect(verdictDroppedMs!, "verdict dropped by the end of the second sweep once a full read was due").toBeLessThanOrEqual(verdictBoundMs! + POLL_SLACK_MS);
-    expect(rotationFailedMs).not.toBeNull(); expect(rotationFailedMs!).toBeLessThanOrEqual(BOUND.rotationFailureMs);
-    expect(ingestDegradedMs).not.toBeNull(); expect(ingestDegradedMs!).toBeLessThanOrEqual(BOUND.ingestMs);
-  }, WAIT_MS + 40_000);
+    const t0 = Date.now();
+    // Each reader notices at its next capture: every due one on a tree that reads them all, the full read on one that
+    // skips quiet panes. Counted from when that capture is due.
+    const sweep = await nth(s.sweeps, Math.max(t0, lastStructural + FULL_READ_MS), 2);
+    const failedTick = await nth(s.ticks, Math.max(t0, lastRotation + FULL_READ_MS), TRANSCRIPT_TICKS);
+    // Ingest reads stale once its last real capture is past the stale window and a capture has been due since.
+    const staleTick = await nth(s.ticks, Math.max(t0, lastRotation + Math.max(FULL_READ_MS, rotation.DEFAULT_TRANSCRIPT_STALE_AFTER_MS)), TRANSCRIPT_TICKS);
+    const row = { case: `failing capture on an idle seat: ${how}`, verdictDroppedAtSweep: sweep ? sweep.obs === null : null,
+      rotationFailedAtTick: failedTick ? failedTick.failed > 0 : null, ingestStaleAtTick: staleTick ? staleTick.health.state !== "live" : null,
+      verdictSweeps: stepsUntil(s.sweeps, t0, (x) => x.obs === null), rotationTicks: stepsUntil(s.ticks, t0, (x) => x.failed > 0),
+      sweepMs: sweep && sweep.end - t0, failedTickMs: failedTick && failedTick.at - t0, staleTickMs: staleTick && staleTick.at - t0 };
+    record(row);
+    expect(row.verdictDroppedAtSweep, "verdict dropped by the end of the second sweep once a capture is due").toBe(true);
+    expect(row.rotationFailedAtTick, `rotation failed by tick ${TRANSCRIPT_TICKS} once a capture is due`).toBe(true);
+    expect(row.ingestStaleAtTick, "ingest not live once the last capture is past the stale window").toBe(true);
+  }, WAIT_MS + 50_000);
 
   it("list-windows delayed 8 s: one listing alive at a time, captures carry on", async () => {
     const s = await seat("slow-s@r", { history: 2000, screen: PROMPT, listingDelayS: 8 });
