@@ -121,7 +121,7 @@ describe("config routes (User Settings v0)", () => {
     expect(body.settings["bundle.services_enabled"]).toMatchObject({ value: false, source: "default", defaultValue: false });
     // + 1 provider.subscription_moves (slice 18 subscription move record; default off).
     // + 1 terminal.history_limit (rows of tmux scrollback in the block rig setup writes; default 10000).
-    expect(Object.keys(body.settings).length).toBe(83);
+    expect(Object.keys(body.settings).length).toBe(84);
     expect(body.settings["terminal.history_limit"]).toMatchObject({ value: 10000, source: "default", defaultValue: 10000 });
     expect(body.settings["provider.subscription_moves"]).toMatchObject({ value: false, source: "default", defaultValue: false });
     expect(body.settings["launch.non_interruptive"]).toMatchObject({ value: false, source: "default" });

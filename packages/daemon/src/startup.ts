@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { discoverTailscaleSelfNames } from "./middleware/browser-boundary.js";
 import { configureShadowCapture } from "./domain/shadow-capture.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "./domain/seat-delivery-guard.js";
+import { seatCodexCorePluginDir, vendoredCorePluginDir } from "./domain/claude-core-plugin-env.js";
 import { queueRecoveryOwnsWake } from "./domain/queue-wake-ladder.js";
 import { HealthPolicyStore } from "./domain/health-policy.js";
 import { HealthCheckpointSource } from "./domain/health-checkpoints.js";
@@ -517,14 +518,22 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const seatActivityService = new SeatActivityService({
     tmux: tmuxAdapter,
     defaultWindowSeconds: 3,
-    permissionPromptReader: async (sessionName) => {
-      const activity = await probeSessionActivity({ sessionName, runtime: "codex", attachmentType: "tmux", tmuxAdapter });
+    permissionPromptReader: async (sessionName, runtime) => {
+      if (runtime === "claude-code") {
+        const context = sessionRegistry.findResumeContextByName(sessionName);
+        if (!context || context.runtime !== runtime
+            || sessionRegistry.getBindingForNode(context.nodeId)?.attachmentType !== "tmux") return null;
+      }
+      const activity = await probeSessionActivity({ sessionName, runtime, attachmentType: "tmux", tmuxAdapter,
+        visibleScreenOnly: runtime === "claude-code" });
       if (activity.state === "unknown") return null;
+      if (runtime === "claude-code" && activity.state === "needs_input"
+          && !["permission_prompt", "selection_prompt"].includes(activity.reason)) return null;
       return activity.state === "needs_input" && ["permission_prompt", "selection_prompt"].includes(activity.reason);
     },
-    permissionPromptChanged: (sessionName, confirmed) => {
+    permissionPromptChanged: (sessionName, confirmed, runtime) => {
       const latest = agentActivityStore.getLatestForNode({ sessionName });
-      agentActivityStore.recordHookEvent({ sessionName, runtime: "codex", generation: latest?.generation,
+      agentActivityStore.recordHookEvent({ sessionName, runtime, generation: latest?.generation,
         hookEvent: confirmed ? "PermissionPromptConfirmed" : "PermissionPromptCleared" });
     },
     eventBus,
@@ -617,6 +626,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // applies to the NEXT launch without a daemon restart; a resolution failure
   // falls back to off (bar hidden).
   const tmuxOptionSettings = new ContextPackSettingsStore();
+  tmuxAdapter.launchEnvironment = () => ({
+    inheritTmuxEnvironment: tmuxOptionSettings.resolveOne("terminal.inherit_tmux_environment").value === true,
+    // Reuse the selected auth/endpoint channel, not every daemon credential.
+    // Ordinary shell/config roots remain daemon-selected; seat overrides are merged by the adapter.
+    env: { ...Object.fromEntries(["LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "CLAUDE_CONFIG_DIR"]
+      .map(key => [key, process.env[key]])), ...launchSessionEnv },
+  });
   const tmuxOptionDefaults = new TmuxOptionDefaultsApplier({
     tmuxAdapter,
     platform: opts?.tmuxOptionPlatform,
@@ -654,7 +670,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const prepareTeamWorkspace = (sessionName: string) => prepareCodexTeamWorkspace(sessionName,
     new ContextPackSettingsStore().resolveConfig().workspaceRoot,
     process.env.OPENRIG_SHARED_DOCS_ROOT?.trim() || nodePath.join(daemonHome, ".openrig", "shared-docs"), daemonHome);
-  const codexResume = new CodexResumeAdapter(tmuxAdapter, { ensureManagedConfig: () => codexAdapter.ensureManagedConfig(), prepareTeamWorkspace, seatLaunchEnvironment, codexHome: configuredCodexHome, launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH, undefined, configuredCodexHome), readNetworkDefault: readCodexNetworkDefault });
+  const codexResume = new CodexResumeAdapter(tmuxAdapter, { ensureManagedConfig: async () => { await codexAdapter.ensureManagedConfig(); }, prepareTeamWorkspace, seatLaunchEnvironment, codexHome: configuredCodexHome, launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH, undefined, configuredCodexHome), readNetworkDefault: readCodexNetworkDefault });
   // OPR.0.4.6.PI1 — the Pi seat-state root + the compiled runner entry (daemon
   // dist). Shared by the Pi runtime adapter, the resume adapter, and the
   // resume-token capture sidecar reader.
@@ -824,7 +840,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter, readFile: (p: string) => fs.readFileSync(p, "utf-8") });
   const runtimeSettings = new ContextPackSettingsStore().resolveConfig();
   const claudeAdapter = new ClaudeCodeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, claudeManagedLaunch, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), copyFile: replaceFile, listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, readdir: (dir: string) => fs.readdirSync(dir), statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: os.homedir() }, stateDir: OPENRIG_HOME, collectorAssetPath: nodePath.resolve(import.meta.dirname, "../assets/claude-statusline-context.cjs"), autoDriveProviderPrompts: runtimeSettings.recoveryAutoDriveProviderPrompts, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), claudeHooksManifestPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json"), recordProjection: (targetPath: string, content: string) => projectionManifestStore.record({ targetPath, lastHash: hashContent(content), writtenAt: new Date().toISOString() }) });
-  const codexAdapter = new CodexRuntimeAdapter({ prepareTeamWorkspace, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: daemonHome }, codexHome: configuredCodexHome, launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH, undefined, configuredCodexHome), readNetworkDefault: readCodexNetworkDefault, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), resolveHooksEnabled: async () => {
+  const codexAdapter = new CodexRuntimeAdapter({ prepareTeamWorkspace, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: daemonHome }, codexHome: configuredCodexHome, launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH, undefined, configuredCodexHome), readNetworkDefault: readCodexNetworkDefault, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), resolveCorePluginDir: () => vendoredCorePluginDir(), resolveCorePluginSelected: (nodeId: string) => Boolean(seatCodexCorePluginDir({ id: nodeId, runtime: "codex" }, db)), resolveHooksEnabled: async () => {
     const { SettingsStore } = await import("./domain/user-settings/settings-store.js");
     return new SettingsStore().resolveOne("runtime.codex.hooks_enabled").value as boolean;
   }, resolveManagedConfigSettings: async () => {
@@ -939,6 +955,15 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     }
   } catch (err) {
     console.error(`[openrig] plugin vendor setup warning: ${(err as Error).message}`);
+  }
+
+  // After vendoring, so Codex installs the openrig-core version this daemon ships: only when some Codex seat's resolved
+  // selection includes it (a daemon whose Codex seats didn't select it never installs it).
+  try {
+    const codexNodes = db.prepare("SELECT id FROM nodes WHERE runtime = 'codex'").all() as Array<{ id: string }>;
+    await codexAdapter.ensureCodexCorePluginAtBoot(codexNodes.some(({ id }) => Boolean(seatCodexCorePluginDir({ id, runtime: "codex" }, db))));
+  } catch (err) {
+    console.error(`[openrig] runtime setup warning: ${(err as Error).message}`);
   }
 
   // PL-014: one daemon-scoped ContextPackLibraryService backs the

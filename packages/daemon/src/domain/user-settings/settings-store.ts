@@ -184,6 +184,7 @@ export const SETTINGS_VALID_KEYS = [
   "terminal.status_bar",
   // The managed ~/.tmux.conf block's history-limit; written by `rig setup` (CLI), twin of the CLI key.
   "terminal.history_limit",
+  "terminal.inherit_tmux_environment",
   // Slice 15 (OPR.0.7.0.15) — compact command-output defaults; CLI-read, twin of the CLI key.
   "output.compact",
   "output.whoami_peers",
@@ -302,6 +303,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   // OPR.0.4.6.02 S1 — net-new key; OPENRIG_* primary only (no RIGGED_* legacy).
   "terminal.status_bar": { primary: "OPENRIG_TERMINAL_STATUS_BAR" },
   "terminal.history_limit": { primary: "OPENRIG_TERMINAL_HISTORY_LIMIT" },
+  "terminal.inherit_tmux_environment": { primary: "OPENRIG_TERMINAL_INHERIT_TMUX_ENVIRONMENT" },
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
   "output.whoami_peers": { primary: "OPENRIG_OUTPUT_WHOAMI_PEERS" },
   "provider.usage_windows": { primary: "OPENRIG_PROVIDER_USAGE_WINDOWS" },
@@ -390,6 +392,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
   "terminal.status_bar": ["terminal", "statusBar"],
   "terminal.history_limit": ["terminal", "historyLimit"],
+  "terminal.inherit_tmux_environment": ["terminal", "inheritTmuxEnvironment"],
   "output.compact": ["output", "compact"],
   "output.whoami_peers": ["output", "whoamiPeers"],
   "provider.usage_windows": ["provider", "usageWindows"],
@@ -673,6 +676,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // is redundant chrome). Operator flip is future-launches-only.
     case "terminal.status_bar": return false;
     case "terminal.history_limit": return 10000;
+    case "terminal.inherit_tmux_environment": return false;
     case "output.compact": return false;
     case "output.whoami_peers": return 8;
     case "provider.usage_windows": return false;

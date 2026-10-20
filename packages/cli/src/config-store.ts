@@ -164,6 +164,7 @@ export interface RiggedConfig {
     statusBar: boolean;
     /** Rows of tmux scrollback per pane; `rig setup` writes it into the managed `~/.tmux.conf` block. */
     historyLimit: number;
+    inheritTmuxEnvironment: boolean;
   };
   // Slice 15 (OPR.0.7.0.15) — the ONE switch for compact command-output
   // defaults (default off: today's output). Read by the CLI only; the daemon
@@ -343,6 +344,7 @@ const DEFAULTS = {
   terminal: {
     statusBar: false,
     historyLimit: 10000,
+    inheritTmuxEnvironment: false,
   },
   // Slice 15 — compact command-output defaults OFF until the switch is on.
   output: {
@@ -481,6 +483,7 @@ export const VALID_KEYS = [
   "terminal.status_bar",
   // The managed ~/.tmux.conf block's history-limit, written by `rig setup`; lockstep with the daemon twin.
   "terminal.history_limit",
+  "terminal.inherit_tmux_environment",
   // Slice 15 — compact command-output defaults; lockstep with the daemon twin.
   "output.compact",
   "output.whoami_peers",
@@ -591,6 +594,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   // OPR.0.4.6.02 S1 — net-new key; OPENRIG_* primary only (no RIGGED_* legacy).
   "terminal.status_bar": { primary: "OPENRIG_TERMINAL_STATUS_BAR" },
   "terminal.history_limit": { primary: "OPENRIG_TERMINAL_HISTORY_LIMIT" },
+  "terminal.inherit_tmux_environment": { primary: "OPENRIG_TERMINAL_INHERIT_TMUX_ENVIRONMENT" },
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
   "output.whoami_peers": { primary: "OPENRIG_OUTPUT_WHOAMI_PEERS" },
   "provider.usage_windows": { primary: "OPENRIG_PROVIDER_USAGE_WINDOWS" },
@@ -680,6 +684,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
   "terminal.status_bar": ["terminal", "statusBar"],
   "terminal.history_limit": ["terminal", "historyLimit"],
+  "terminal.inherit_tmux_environment": ["terminal", "inheritTmuxEnvironment"],
   "output.compact": ["output", "compact"],
   "output.whoami_peers": ["output", "whoamiPeers"],
   "provider.usage_windows": ["provider", "usageWindows"],
@@ -1230,6 +1235,7 @@ export class ConfigStore {
       terminal: {
         statusBar: v("terminal.status_bar") as boolean,
         historyLimit: v("terminal.history_limit") as number,
+        inheritTmuxEnvironment: v("terminal.inherit_tmux_environment") as boolean,
       },
       output: {
         compact: v("output.compact") as boolean,
