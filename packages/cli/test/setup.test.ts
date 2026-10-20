@@ -222,22 +222,20 @@ describe("rig setup", () => {
     expect(verify?.status).toBe("pass");
   });
 
-  it("managed tmux block keeps history above the transcript window and small enough for a long-lived fleet", async () => {
-    const writeSpy = vi.fn();
-    await runSetup(makeDeps({ writeFile: writeSpy }), {});
-    const [, conf] = writeSpy.mock.calls.find(([p]) => String(p).endsWith("/.tmux.conf"))!;
-    const limit = Number(/^set -g history-limit (\d+)$/m.exec(String(conf))?.[1]);
-    // Rotation captures the last 1000 rows (transcripts.lines default): history must hold them with margin.
-    expect(limit).toBeGreaterThanOrEqual(2000);
-    // tmux 3.4 at 90 panes x 50000 rows: 12.8 GB server heap and 250 ms/s of server CPU under the daemon's captures.
-    expect(limit).toBeLessThanOrEqual(10000);
-  });
-
   describe("terminal.history_limit in the managed tmux block", () => {
     const BLOCK = (limit: number) => `# OpenRig managed block\nset -g mouse on\nset -g history-limit ${limit}\n# End # OpenRig managed block`;
     let dir: string;
-    beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "setup-history-limit-")); });
-    afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+    let envLimit: string | undefined;
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), "setup-history-limit-"));
+      envLimit = process.env["OPENRIG_TERMINAL_HISTORY_LIMIT"];
+      delete process.env["OPENRIG_TERMINAL_HISTORY_LIMIT"];
+    });
+    afterEach(() => {
+      rmSync(dir, { recursive: true, force: true });
+      if (envLimit === undefined) delete process.env["OPENRIG_TERMINAL_HISTORY_LIMIT"];
+      else process.env["OPENRIG_TERMINAL_HISTORY_LIMIT"] = envLimit;
+    });
 
     async function setupConf(store: ConfigStore, existing: string | null): Promise<{ conf: string; step: SetupStep | undefined }> {
       const writeSpy = vi.fn();
@@ -245,6 +243,15 @@ describe("rig setup", () => {
       const [, conf] = writeSpy.mock.calls.find(([p]) => String(p).endsWith("/.tmux.conf"))!;
       return { conf: String(conf), step: result.steps.find((s) => s.id === "tmux_config") };
     }
+
+    it("keeps the default above the transcript window and small enough for a long-lived fleet", async () => {
+      const { conf } = await setupConf(new ConfigStore(join(dir, "config.json")), null);
+      const limit = Number(/^set -g history-limit (\d+)$/m.exec(conf)?.[1]);
+      // Rotation captures the last 1000 rows (transcripts.lines default): history must hold them with margin.
+      expect(limit).toBeGreaterThanOrEqual(2000);
+      // tmux 3.4 at 90 panes x 50000 rows: 12.8 GB server heap and 250 ms/s of server CPU under the daemon's captures.
+      expect(limit).toBeLessThanOrEqual(10000);
+    });
 
     it("writes 10000 rows by default", async () => {
       const store = new ConfigStore(join(dir, "config.json"));
