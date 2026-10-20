@@ -705,8 +705,8 @@ export function setupCommand(depsOverride?: SetupDeps): Command {
 tmux scrollback:
   The OpenRig block in ~/.tmux.conf keeps terminal.history_limit rows per pane (default 10000).
   To keep more:  rig config set terminal.history_limit 50000   then rerun  rig setup
-  A running tmux server keeps its old limit until it restarts; on tmux 3.4 a live pane
-  keeps it until its session is recreated.`)
+  A running tmux server keeps its old limit until it restarts or you run
+  tmux source-file ~/.tmux.conf; before tmux 3.7 that changes new panes only.`)
     .action(async (opts: { dryRun?: boolean; json?: boolean; full?: boolean; herdr?: boolean; ghostty?: boolean; providers?: string; policy?: string; spec?: string }) => {
       const providers = opts.providers === undefined ? undefined : parseSetupProviders(opts.providers);
       if (providers && "error" in providers) {
