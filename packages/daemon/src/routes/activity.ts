@@ -40,6 +40,9 @@ export function evidenceFromHookActivity(input: {
     seq: input.seq,
     observedAt: input.activity.eventAt ?? input.activity.sampledAt,
   };
+  if (input.activity.reason === "permission_request_pending") {
+    return { ...base, permissionRequest: { id: input.activity.turnId ?? "uncorrelated" } };
+  }
   switch (input.activity.state) {
     case "running":
       return { ...base, activity: "working", needsInput: { count: 0, reason: null } };
@@ -376,6 +379,7 @@ activityRoutes.post("/hooks", async (c) => {
     // Legacy, excluded, or no-tenure emitting paths may omit it ⇒ stamped null ⇒ unresolved at read
     // (sound per-path absence; never false-fresh).
     generation: stringOrNull(body.generation),
+    turnId: stringOrNull(body.turnId),
   });
 
   if (!result.ok) {
@@ -478,6 +482,7 @@ activityRoutes.get("/parked", (c) => {
     | {
         list: (opts: { destinationSession?: string; state?: string[]; limit?: number }) => Array<{ qitemId: string; state: string; summary?: string | null }>;
         getParkWakeStatus: (qitemId: string) => import("../domain/queue-wake-repository.js").ParkWakeStatus | null;
+        parkWakeServedByOwnReminder?: (qitemId: string) => boolean;
       }
     | undefined;
   const rigRepo = c.get("rigRepo" as never) as { db: import("better-sqlite3").Database } | undefined;
@@ -499,6 +504,7 @@ activityRoutes.get("/parked", (c) => {
       limit,
     }),
     getParkWake: (qitemId: string) => queueRepo.getParkWakeStatus(qitemId),
+    servedByOwnReminder: (qitemId: string) => queueRepo.parkWakeServedByOwnReminder?.(qitemId) === true,
   };
 
   // WAVE-O B2 (R2 508e383d): the diagnosis is RIG-SCOPED, never fleet-wide. Resolve ONE

@@ -98,6 +98,18 @@ describe("Send CLI", () => {
           lastBroadcastBody = parsed;
           const sessions: string[] = (parsed.sessions as string[] | undefined)
             ?? ["seat-a@my-rig", "seat-b@my-rig"]; // pod/rig/global resolve to a fixed pair
+          if (parsed.text === "compaction-notice") {
+            const notice = (who: string) => ({ stage: "restoring", observed: "before_send", notice: `${who} was mid-restore (as recorded). This doesn't mean the restore has finished.` });
+            const results = [
+              { ok: true, sessionName: "a@r", managedCompaction: notice("a@r") },
+              { ok: true, sessionName: "b@r" },
+              { ok: false, sessionName: "c@r", error: "paste failed", managedCompaction: notice("c@r") },
+              { ok: true, sessionName: "d@r", outcome: "retained", sent: false, managedCompaction: notice("d@r") },
+            ];
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ total: 4, sent: 2, failed: 1, retained: 1, results }));
+            return;
+          }
           if (parsed.text === "partial") {
             const results = [
               { ok: true, sessionName: sessions[0] },
@@ -162,12 +174,40 @@ describe("Send CLI", () => {
           } else if (parsed.session === "racy-session") {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: true, sessionName: "racy-session", verified: false, outcome: "rendered-unconfirmed" }));
+          } else if (parsed.session === "input-box-verified") {
+            // transport.verify_input_box on: the result carries the input-box readings.
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, sessionName: "input-box-verified", verified: true, outcome: "delivered",
+              inputBox: { seat: "idle", before: "exact", after: "empty", sameProcess: true } }));
+          } else if (parsed.session === "input-box-queued") {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, sessionName: "input-box-queued", verified: false, outcome: "rendered-unconfirmed",
+              inputBox: { seat: "not-idle", before: "exact", after: "queued", sameProcess: true } }));
+          } else if (parsed.session === "input-box-other-process") {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, sessionName: "input-box-other-process", verified: false, outcome: "rendered-unconfirmed",
+              inputBox: { seat: "unknown", before: "hidden", after: "empty", sameProcess: false } }));
+          } else if (parsed.session === "input-box-ambiguous") {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, sessionName: "input-box-ambiguous", verified: false, outcome: "rendered-unconfirmed",
+              inputBox: { seat: "idle", before: "ambiguous", after: "empty", sameProcess: true } }));
+          } else if (parsed.session === "input-box-unchecked") {
+            // An audited prompt answer with the setting on: its path reads no box.
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, sessionName: "input-box-unchecked", verified: false, outcome: "rendered-unconfirmed",
+              inputBox: { seat: "unchecked", before: "unchecked", after: "unchecked", sameProcess: false } }));
           } else if (parsed.session === "dead-session") {
             res.writeHead(502, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: false, sessionName: "dead-session", reason: "submit_failed", outcome: "failed", error: "Text is visible in 'dead-session' but was not submitted (Enter failed)." }));
           } else if (parsed.session === "busy-session") {
             res.writeHead(409, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: false, sessionName: "busy-session", reason: "mid_work", error: "Target pane appears mid-task. Use force: true to send anyway." }));
+          } else if (parsed.session === "restoring-seat" || parsed.session === "restoring-failed") {
+            const managedCompaction = { stage: "restoring", observed: "before_send", notice: "restoring-seat was mid-restore (as recorded). This doesn't mean the restore has finished." };
+            const failed = parsed.session === "restoring-failed";
+            res.writeHead(failed ? 502 : 200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(failed ? { ok: false, sessionName: parsed.session, error: "paste failed", managedCompaction }
+              : { ok: true, sessionName: parsed.session, managedCompaction }));
           } else if (parsed.session === "unknown-advisory") {
             // OPR.0.4.3.28 — unknown telemetry now PROCEEDS with a non-blocking advisory (warning).
             res.writeHead(200, { "Content-Type": "application/json" });
@@ -362,6 +402,16 @@ describe("Send CLI", () => {
 
   // OPR.0.4.3.28 correction — an unknown-telemetry send PROCEEDS and PRINTS the advisory on
   // human output (not only in --json).
+  it("prints the managed compaction notice beside the send's own result, sent or failed", async () => {
+    const sent = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "send", "restoring-seat", "hello"]); });
+    expect(sent.logs.join("\n")).toContain("Sent to restoring-seat\nNotice: restoring-seat was mid-restore (as recorded). This doesn't mean the restore has finished.");
+    const failed = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "send", "restoring-failed", "hello"]); });
+    expect(failed.logs.join("\n")).toContain("paste failed");
+    expect(failed.logs.join("\n")).toContain("Notice: restoring-seat was mid-restore");
+    expect(failed.logs.join("\n")).not.toContain("Sent to");
+    expect(failed.exitCode).toBe(2);
+  });
+
   it("prints the Advisory on an unknown-proceed send (human output)", async () => {
     const { logs, exitCode } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "send", "unknown-advisory", "hello"]);
@@ -404,6 +454,54 @@ describe("Send CLI", () => {
     expect(output).toContain("rig capture racy-session");
     // The middle is NOT dressed as failure: exit stays clean.
     expect(exitCode).toBeUndefined();
+  });
+
+  it("verify with input-box evidence prints the input-box Delivery wording, never agent acknowledgement", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "input-box-verified", "hello", "--verify"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("Verified: yes");
+    expect(output).toContain("Delivery: delivered (seat idle before the paste; input box: the exact text before Enter, empty after it, same pane process; not agent acknowledgement)");
+    expect(output).not.toContain("render confirmed");
+  });
+
+  it("verify with input-box evidence names both readings when unconfirmed, and says it is not a failure", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "input-box-queued", "hello", "--verify"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("Verified: no");
+    expect(output).toContain("Delivery: rendered-unconfirmed (seat before the paste: not idle (a running turn, a queue, a pending input or a paste hint showed); input box before Enter: the exact text; after Enter: queued or possibly queued (a queued label, or a turn was running); not a failure; to look, optionally: rig capture input-box-queued)");
+    expect(output).not.toContain("pane re-render not confirmed");
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("verify with input-box evidence says when the pane process changed or is unknown", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "input-box-other-process", "hello", "--verify"]);
+    });
+    expect(logs.join("\n")).toContain("Delivery: rendered-unconfirmed (seat before the paste: not a known idle layout; input box before Enter: a collapsed paste (text hidden); after Enter: empty; pane process changed or unknown; not a failure; to look, optionally: rig capture input-box-other-process)");
+  });
+
+  it("verify with input-box evidence: an ambiguous box says the word boundaries were uncertain", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "input-box-ambiguous", "hello", "--verify"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("Verified: no");
+    expect(output).toContain("Delivery: rendered-unconfirmed (seat before the paste: idle; input box before Enter: the text, but a line break in the box may split a word (word boundaries uncertain); after Enter: empty; not a failure; to look, optionally: rig capture input-box-ambiguous)");
+  });
+
+  it("verify with input-box evidence: an unchecked path says plainly it was not checked and is unconfirmed, never verified", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "input-box-unchecked", "hello", "--verify"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("Verified: no");
+    expect(output).toContain("Delivery: rendered-unconfirmed (input box not checked: an audited prompt answer is typed as keys and its box is not read; not a failure; to look, optionally: rig capture input-box-unchecked)");
+    expect(output).not.toContain("pane re-render not confirmed");
+    expect(output).not.toMatch(/resend|send it again|re-send/i);
   });
 
   it("verify genuine transport failure stays an error path, distinct from the middle (discriminator)", async () => {
@@ -607,6 +705,30 @@ describe("Send CLI", () => {
     const ri = argv.indexOf("--reason");
     expect(ri).toBeGreaterThan(-1);
     expect(argv[ri + 1]).toBe("why now");
+  });
+
+
+  it.each(["\r", "\x1b", "\t", " "])("preserves an explicit interaction byte in SSH argv (%#)", async answer => {
+    let captured: readonly string[] = [];
+    const deps: SendDeps = { ...runningDeps(port),
+      hostRegistryLoader: () => ({ ok: true, registry: { hosts: [{ id: "vm-test", transport: "ssh", target: "vm.local" }] } }),
+      crossHostRun: async (_host, argv) => { captured = argv; return { ok: true, stdout: "remote ok", stderr: "" }; } };
+    const result = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "send", "dev-impl@my-rig", answer,
+        "--host", "vm-test", "--dangerously-interact", "--reason", "explicit key"]);
+    });
+    expect(result.exitCode).toBeFalsy();
+    expect(captured.slice(0, 4)).toEqual(["rig", "send", "dev-impl@my-rig", answer]);
+    expect(captured).toContain("--dangerously-interact");
+    expect(captured[captured.indexOf("--reason") + 1]).toBe("explicit key");
+  });
+
+  it.each(["\r", "\t", " "])("--raw alone retains whitespace refusal (%#)", async answer => {
+    const result = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", answer, "--raw"]);
+    });
+    expect(result.exitCode).toBe(1);
+    expect(lastSendBody).toBeNull();
   });
 
   // Slice-03 Atom 6b QA fix — the agent@rig@host SUGAR host folds in AFTER the
@@ -849,6 +971,18 @@ describe("Send CLI", () => {
       expect(output).toMatch(/unverifiable|not .{0,20}this send|does not match this send/i);
       expect(output).toContain("Verified: yes"); // the transport verdict stands, honestly qualified
     });
+  });
+
+  it("fan-out prints each recipient's compaction notice under that recipient's line; exit code unchanged", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "--to", "a@r,b@r,c@r,d@r", "compaction-notice"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("a@r: sent\nNotice: a@r was mid-restore (as recorded). This doesn't mean the restore has finished.\nb@r: sent\n");
+    expect(output).toContain("c@r: FAILED — paste failed\nNotice: c@r was mid-restore");
+    expect(output).toContain("d@r: retained, not delivered; inspect with rig seat held-messages\nNotice: d@r was mid-restore");
+    expect(output.match(/^Notice: /gm)).toHaveLength(3); // none for b@r
+    expect(exitCode).toBe(1); // a failed recipient, as before
   });
 
   // S2 (OPR.0.5.4.3): the fan-out renderer must SURFACE an additive warning —
