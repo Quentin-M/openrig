@@ -162,6 +162,8 @@ export interface RiggedConfig {
   // `rig config get/set terminal.status_bar` surface + twin parity.
   terminal: {
     statusBar: boolean;
+    /** Rows of tmux scrollback per pane; `rig setup` writes it into the managed `~/.tmux.conf` block. */
+    historyLimit: number;
   };
   // Slice 15 (OPR.0.7.0.15) — the ONE switch for compact command-output
   // defaults (default off: today's output). Read by the CLI only; the daemon
@@ -340,6 +342,7 @@ const DEFAULTS = {
   // OPR.0.4.6.02 S1 — inner-tmux status bar OFF at launch by default.
   terminal: {
     statusBar: false,
+    historyLimit: 10000,
   },
   // Slice 15 — compact command-output defaults OFF until the switch is on.
   output: {
@@ -476,6 +479,8 @@ export const VALID_KEYS = [
   // boolean (default off), lockstep with the daemon settings-store twin
   // (the parity test pins both). Flip is future-launches-only (BR-1).
   "terminal.status_bar",
+  // The managed ~/.tmux.conf block's history-limit, written by `rig setup`; lockstep with the daemon twin.
+  "terminal.history_limit",
   // Slice 15 — compact command-output defaults; lockstep with the daemon twin.
   "output.compact",
   "output.whoami_peers",
@@ -585,6 +590,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "snapshots.periodic.retention_keep": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_RETENTION_KEEP" },
   // OPR.0.4.6.02 S1 — net-new key; OPENRIG_* primary only (no RIGGED_* legacy).
   "terminal.status_bar": { primary: "OPENRIG_TERMINAL_STATUS_BAR" },
+  "terminal.history_limit": { primary: "OPENRIG_TERMINAL_HISTORY_LIMIT" },
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
   "output.whoami_peers": { primary: "OPENRIG_OUTPUT_WHOAMI_PEERS" },
   "provider.usage_windows": { primary: "OPENRIG_PROVIDER_USAGE_WINDOWS" },
@@ -673,6 +679,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "snapshots.periodic.interval_seconds": ["snapshots", "periodic", "intervalSeconds"],
   "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
   "terminal.status_bar": ["terminal", "statusBar"],
+  "terminal.history_limit": ["terminal", "historyLimit"],
   "output.compact": ["output", "compact"],
   "output.whoami_peers": ["output", "whoamiPeers"],
   "provider.usage_windows": ["provider", "usageWindows"],
@@ -888,6 +895,12 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   "runtime.readiness_timeout_seconds": (raw, coerced) => {
     if (!/^\d+$/.test(raw.trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1 || coerced > 600) {
       throw new Error(`Invalid value for runtime.readiness_timeout_seconds: must be an integer in [1, 600], got "${raw}"`);
+    }
+  },
+  // tmux trims a full pane by a tenth of the limit, so 2000 keeps the 1000-row transcript window.
+  "terminal.history_limit": (raw, coerced) => {
+    if (!/^\d+$/.test(raw.trim()) || typeof coerced !== "number" || !Number.isSafeInteger(coerced) || coerced < 2000 || coerced > 1_000_000) {
+      throw new Error(`Invalid value for terminal.history_limit: must be an integer in [2000, 1000000], got "${raw}"`);
     }
   },
   // daemon.port had no KEY_CONSTRAINTS entry, so `rig config set daemon.port
@@ -1216,6 +1229,7 @@ export class ConfigStore {
       },
       terminal: {
         statusBar: v("terminal.status_bar") as boolean,
+        historyLimit: v("terminal.history_limit") as number,
       },
       output: {
         compact: v("output.compact") as boolean,

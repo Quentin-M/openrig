@@ -219,6 +219,11 @@ writes an OpenRig-managed block (mouse on, a longer history) into `~/.tmux.conf`
 It is optional for this selected-provider path, not a requirement to fix an unused
 provider.
 
+The block keeps `terminal.history_limit` rows of scrollback per pane (default
+10000). To keep more, run `rig config set terminal.history_limit 50000`, then
+`rig setup` again. A running tmux server keeps its old limit until it restarts;
+on tmux 3.4 a live pane keeps it until its session is recreated.
+
 ## Start the kernel and check its state
 
 With a working selected login, start the daemon if it is stopped, then read its
